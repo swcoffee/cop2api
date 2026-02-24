@@ -7,6 +7,9 @@ import { state } from "~/lib/state"
 
 export const createChatCompletions = async (
   payload: ChatCompletionsPayload,
+  options?: {
+    initiator?: "agent" | "user"
+  },
 ) => {
   if (!state.copilotToken) throw new Error("Copilot token not found")
 
@@ -18,14 +21,19 @@ export const createChatCompletions = async (
 
   // Agent/user check for X-Initiator header
   // Determine if any message is from an agent ("assistant" or "tool")
-  const isAgentCall = payload.messages.some((msg) =>
-    ["assistant", "tool"].includes(msg.role),
-  )
+  // Refactor `isAgentCall` logic to check only the last message in the history rather than any message. This prevents valid user messages from being incorrectly flagged as agent calls due to previous assistant history, ensuring proper credit consumption for multi-turn conversations.
+  let isAgentCall = false
+  if (payload.messages.length > 0) {
+    const lastMessage = payload.messages.at(-1)
+    if (lastMessage) {
+      isAgentCall = ["assistant", "tool"].includes(lastMessage.role)
+    }
+  }
 
   // Build headers and add X-Initiator
   const headers: Record<string, string> = {
     ...copilotHeaders(state, enableVision),
-    "X-Initiator": isAgentCall ? "agent" : "user",
+    "X-Initiator": options?.initiator ?? (isAgentCall ? "agent" : "user"),
   }
 
   const response = await fetch(`${copilotBaseUrl(state)}/chat/completions`, {

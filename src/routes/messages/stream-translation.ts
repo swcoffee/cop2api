@@ -8,6 +8,7 @@ import {
   type AnthropicStreamEventData,
   type AnthropicStreamState,
 } from "./anthropic-types"
+import { THINKING_TEXT } from "./non-stream-translation"
 import { mapOpenAIStopReasonToAnthropic } from "./utils"
 
 function isToolBlockOpen(state: AnthropicStreamState): boolean {
@@ -218,6 +219,7 @@ function handleContent(
     delta.content === ""
     && delta.reasoning_opaque
     && delta.reasoning_opaque.length > 0
+    && state.thinkingBlockOpen
   ) {
     events.push(
       {
@@ -291,7 +293,7 @@ function handleReasoningOpaque(
         index: state.contentBlockIndex,
         delta: {
           type: "thinking_delta",
-          thinking: "",
+          thinking: THINKING_TEXT, // Compatible with opencode, it will filter out blocks where the thinking text is empty, so we add a default thinking text here
         },
       },
       {
@@ -317,6 +319,15 @@ function handleThinkingText(
   events: Array<AnthropicStreamEventData>,
 ) {
   if (delta.reasoning_text && delta.reasoning_text.length > 0) {
+    // compatible with copilot API returning content->reasoning_text->reasoning_opaque in different deltas
+    // this is an extremely abnormal situation, probably a server-side bug
+    // only occurs in the claude model, with a very low probability of occurrence
+    if (state.contentBlockOpen) {
+      delta.content = delta.reasoning_text
+      delta.reasoning_text = undefined
+      return
+    }
+
     if (!state.thinkingBlockOpen) {
       events.push({
         type: "content_block_start",

@@ -7,15 +7,16 @@ export const standardHeaders = () => ({
   accept: "application/json",
 })
 
-const COPILOT_VERSION = "0.35.0"
+const COPILOT_VERSION = "0.37.6"
 const EDITOR_PLUGIN_VERSION = `copilot-chat/${COPILOT_VERSION}`
 const USER_AGENT = `GitHubCopilotChat/${COPILOT_VERSION}`
 
 const API_VERSION = "2025-10-01"
 
 export const copilotBaseUrl = (state: State) =>
-  `https://api.${state.accountType}.githubcopilot.com`
-
+  state.accountType === "individual" ?
+    "https://api.githubcopilot.com"
+  : `https://api.${state.accountType}.githubcopilot.com`
 export const copilotHeaders = (state: State, vision: boolean = false) => {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${state.copilotToken}`,

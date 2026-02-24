@@ -2,8 +2,14 @@ import type { Context } from "hono"
 
 import { streamSSE } from "hono/streaming"
 
+import type { Model } from "~/services/copilot/get-models"
+
 import { awaitApproval } from "~/lib/approval"
-import { getSmallModel } from "~/lib/config"
+import {
+  getSmallModel,
+  shouldCompactUseSmallModel,
+  getReasoningEffortForModel,
+} from "~/lib/config"
 import { createHandlerLogger } from "~/lib/logger"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { state } from "~/lib/state"
@@ -22,6 +28,7 @@ import {
   type ChatCompletionChunk,
   type ChatCompletionResponse,
 } from "~/services/copilot/create-chat-completions"
+import { createMessages } from "~/services/copilot/create-messages"
 import {
   createResponses,
   type ResponsesResult,
@@ -31,14 +38,20 @@ import {
 import {
   type AnthropicMessagesPayload,
   type AnthropicStreamState,
+  type AnthropicTextBlock,
+  type AnthropicToolResultBlock,
 } from "./anthropic-types"
 import {
   translateToAnthropic,
   translateToOpenAI,
 } from "./non-stream-translation"
 import { translateChunkToAnthropicEvents } from "./stream-translation"
+import { parseSubagentMarkerFromFirstUser } from "./subagent-marker"
 
 const logger = createHandlerLogger("messages-handler")
+
+const compactSystemPromptStart =
+  "You are a helpful AI assistant tasked with summarizing conversations"
 
 export async function handleCompletion(c: Context) {
   await checkRateLimit(state)
@@ -46,32 +59,68 @@ export async function handleCompletion(c: Context) {
   const anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
   logger.debug("Anthropic request payload:", JSON.stringify(anthropicPayload))
 
+  const subagentMarker = parseSubagentMarkerFromFirstUser(anthropicPayload)
+  const initiatorOverride = subagentMarker ? "agent" : undefined
+  if (subagentMarker) {
+    logger.debug("Detected Subagent marker:", JSON.stringify(subagentMarker))
+  }
+
+  // claude code and opencode compact request detection
+  const isCompact = isCompactRequest(anthropicPayload)
+
   // fix claude code 2.0.28+ warmup request consume premium request, forcing small model if no tools are used
   // set "CLAUDE_CODE_SUBAGENT_MODEL": "you small model" also can avoid this
   const anthropicBeta = c.req.header("anthropic-beta")
+  logger.debug("Anthropic Beta header:", anthropicBeta)
   const noTools = !anthropicPayload.tools || anthropicPayload.tools.length === 0
-  if (anthropicBeta && noTools) {
+  if (anthropicBeta && noTools && !isCompact) {
     anthropicPayload.model = getSmallModel()
   }
 
-  const useResponsesApi = shouldUseResponsesApi(anthropicPayload.model)
+  if (isCompact) {
+    logger.debug("Is compact request:", isCompact)
+    if (shouldCompactUseSmallModel()) {
+      anthropicPayload.model = getSmallModel()
+    }
+  } else {
+    // Merge tool_result and text blocks into tool_result to avoid consuming premium requests
+    // (caused by skill invocations, edit hooks, plan or to do reminders)
+    // e.g. {"role":"user","content":[{"type":"tool_result","content":"Launching skill: xxx"},{"type":"text","text":"xxx"}]}
+    // not only for claude, but also for opencode
+    // compact requests are excluded from this processing
+    mergeToolResultForClaude(anthropicPayload)
+  }
 
   if (state.manualApprove) {
     await awaitApproval()
   }
 
-  if (useResponsesApi) {
-    return await handleWithResponsesApi(c, anthropicPayload)
+  const selectedModel = state.models?.data.find(
+    (m) => m.id === anthropicPayload.model,
+  )
+
+  if (shouldUseMessagesApi(selectedModel)) {
+    return await handleWithMessagesApi(c, anthropicPayload, {
+      anthropicBetaHeader: anthropicBeta,
+      initiatorOverride,
+      selectedModel,
+    })
   }
 
-  return await handleWithChatCompletions(c, anthropicPayload)
+  if (shouldUseResponsesApi(selectedModel)) {
+    return await handleWithResponsesApi(c, anthropicPayload, initiatorOverride)
+  }
+
+  return await handleWithChatCompletions(c, anthropicPayload, initiatorOverride)
 }
 
 const RESPONSES_ENDPOINT = "/responses"
+const MESSAGES_ENDPOINT = "/v1/messages"
 
 const handleWithChatCompletions = async (
   c: Context,
   anthropicPayload: AnthropicMessagesPayload,
+  initiatorOverride?: "agent" | "user",
 ) => {
   const openAIPayload = translateToOpenAI(anthropicPayload)
   logger.debug(
@@ -79,7 +128,9 @@ const handleWithChatCompletions = async (
     JSON.stringify(openAIPayload),
   )
 
-  const response = await createChatCompletions(openAIPayload)
+  const response = await createChatCompletions(openAIPayload, {
+    initiator: initiatorOverride,
+  })
 
   if (isNonStreaming(response)) {
     logger.debug(
@@ -131,6 +182,7 @@ const handleWithChatCompletions = async (
 const handleWithResponsesApi = async (
   c: Context,
   anthropicPayload: AnthropicMessagesPayload,
+  initiatorOverride?: "agent" | "user",
 ) => {
   const responsesPayload =
     translateAnthropicMessagesToResponsesPayload(anthropicPayload)
@@ -142,7 +194,7 @@ const handleWithResponsesApi = async (
   const { vision, initiator } = getResponsesRequestOptions(responsesPayload)
   const response = await createResponses(responsesPayload, {
     vision,
-    initiator,
+    initiator: initiatorOverride ?? initiator,
   })
 
   if (responsesPayload.stream && isAsyncIterable(response)) {
@@ -153,7 +205,7 @@ const handleWithResponsesApi = async (
       for await (const chunk of response) {
         const eventName = chunk.event
         if (eventName === "ping") {
-          await stream.writeSSE({ event: "ping", data: "" })
+          await stream.writeSSE({ event: "ping", data: '{"type":"ping"}' })
           continue
         }
 
@@ -212,10 +264,79 @@ const handleWithResponsesApi = async (
   return c.json(anthropicResponse)
 }
 
-const shouldUseResponsesApi = (modelId: string): boolean => {
-  const selectedModel = state.models?.data.find((model) => model.id === modelId)
+const handleWithMessagesApi = async (
+  c: Context,
+  anthropicPayload: AnthropicMessagesPayload,
+  options?: {
+    anthropicBetaHeader?: string
+    initiatorOverride?: "agent" | "user"
+    selectedModel?: Model
+  },
+) => {
+  const { anthropicBetaHeader, initiatorOverride, selectedModel } =
+    options ?? {}
+  // Pre-request processing: filter thinking blocks for Claude models so only
+  // valid thinking blocks are sent to the Copilot Messages API.
+  for (const msg of anthropicPayload.messages) {
+    if (msg.role === "assistant" && Array.isArray(msg.content)) {
+      msg.content = msg.content.filter((block) => {
+        if (block.type !== "thinking") return true
+        return (
+          block.thinking
+          && block.thinking !== "Thinking..."
+          && block.signature
+          && !block.signature.includes("@")
+        )
+      })
+    }
+  }
+
+  if (selectedModel?.capabilities.supports.adaptive_thinking) {
+    anthropicPayload.thinking = {
+      type: "adaptive",
+    }
+    anthropicPayload.output_config = {
+      effort: getAnthropicEffortForModel(anthropicPayload.model),
+    }
+  }
+
+  logger.debug("Translated Messages payload:", JSON.stringify(anthropicPayload))
+
+  const response = await createMessages(anthropicPayload, anthropicBetaHeader, {
+    initiator: initiatorOverride,
+  })
+
+  if (isAsyncIterable(response)) {
+    logger.debug("Streaming response from Copilot (Messages API)")
+    return streamSSE(c, async (stream) => {
+      for await (const event of response) {
+        const eventName = event.event
+        const data = event.data ?? ""
+        logger.debug("Messages raw stream event:", data)
+        await stream.writeSSE({
+          event: eventName,
+          data,
+        })
+      }
+    })
+  }
+
+  logger.debug(
+    "Non-streaming Messages result:",
+    JSON.stringify(response).slice(-400),
+  )
+  return c.json(response)
+}
+
+const shouldUseResponsesApi = (selectedModel: Model | undefined): boolean => {
   return (
     selectedModel?.supported_endpoints?.includes(RESPONSES_ENDPOINT) ?? false
+  )
+}
+
+const shouldUseMessagesApi = (selectedModel: Model | undefined): boolean => {
+  return (
+    selectedModel?.supported_endpoints?.includes(MESSAGES_ENDPOINT) ?? false
   )
 }
 
@@ -226,3 +347,97 @@ const isNonStreaming = (
 const isAsyncIterable = <T>(value: unknown): value is AsyncIterable<T> =>
   Boolean(value)
   && typeof (value as AsyncIterable<T>)[Symbol.asyncIterator] === "function"
+
+const getAnthropicEffortForModel = (
+  model: string,
+): "low" | "medium" | "high" | "max" => {
+  const reasoningEffort = getReasoningEffortForModel(model)
+
+  if (reasoningEffort === "xhigh") return "max"
+  if (reasoningEffort === "none" || reasoningEffort === "minimal") return "low"
+
+  return reasoningEffort
+}
+
+const isCompactRequest = (
+  anthropicPayload: AnthropicMessagesPayload,
+): boolean => {
+  const system = anthropicPayload.system
+  if (typeof system === "string") {
+    return system.startsWith(compactSystemPromptStart)
+  }
+  if (!Array.isArray(system)) return false
+
+  return system.some(
+    (msg) =>
+      typeof msg.text === "string"
+      && msg.text.startsWith(compactSystemPromptStart),
+  )
+}
+
+const mergeContentWithText = (
+  tr: AnthropicToolResultBlock,
+  textBlock: AnthropicTextBlock,
+): AnthropicToolResultBlock => {
+  if (typeof tr.content === "string") {
+    return { ...tr, content: `${tr.content}\n\n${textBlock.text}` }
+  }
+  return {
+    ...tr,
+    content: [...tr.content, textBlock],
+  }
+}
+
+const mergeContentWithTexts = (
+  tr: AnthropicToolResultBlock,
+  textBlocks: Array<AnthropicTextBlock>,
+): AnthropicToolResultBlock => {
+  if (typeof tr.content === "string") {
+    const appendedTexts = textBlocks.map((tb) => tb.text).join("\n\n")
+    return { ...tr, content: `${tr.content}\n\n${appendedTexts}` }
+  }
+  return { ...tr, content: [...tr.content, ...textBlocks] }
+}
+
+const mergeToolResultForClaude = (
+  anthropicPayload: AnthropicMessagesPayload,
+): void => {
+  for (const msg of anthropicPayload.messages) {
+    if (msg.role !== "user" || !Array.isArray(msg.content)) continue
+
+    const toolResults: Array<AnthropicToolResultBlock> = []
+    const textBlocks: Array<AnthropicTextBlock> = []
+    let valid = true
+
+    for (const block of msg.content) {
+      if (block.type === "tool_result") {
+        toolResults.push(block)
+      } else if (block.type === "text") {
+        textBlocks.push(block)
+      } else {
+        valid = false
+        break
+      }
+    }
+
+    if (!valid || toolResults.length === 0 || textBlocks.length === 0) continue
+
+    msg.content = mergeToolResult(toolResults, textBlocks)
+  }
+}
+
+const mergeToolResult = (
+  toolResults: Array<AnthropicToolResultBlock>,
+  textBlocks: Array<AnthropicTextBlock>,
+): Array<AnthropicToolResultBlock> => {
+  // equal lengths -> pairwise merge
+  if (toolResults.length === textBlocks.length) {
+    return toolResults.map((tr, i) => mergeContentWithText(tr, textBlocks[i]))
+  }
+
+  // lengths differ -> append all textBlocks to the last tool_result
+  const lastIndex = toolResults.length - 1
+  return toolResults.map((tr, i) =>
+    i === lastIndex ? mergeContentWithTexts(tr, textBlocks) : tr,
+  )
+}
