@@ -1,8 +1,10 @@
 name: Docker Release
 
 on:
-  push:
-    branches: [ "new" ]
+  workflow_run:
+    workflows: ["Sync new branch from fork"]
+    types:
+      - completed
   workflow_dispatch:
 
 permissions:
@@ -12,11 +14,14 @@ permissions:
 
 jobs:
   build-and-push-image:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: new
 
       - name: Log in to the Container registry
         uses: docker/login-action@v3
@@ -31,8 +36,8 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=raw,value=${{ github.ref_name }}
-            type=raw,value=${{ github.ref_name }}-{{date 'YYYYMMDD'}}
+            type=raw,value=new
+            type=raw,value=new-{{date 'YYYYMMDD'}}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
