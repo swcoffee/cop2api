@@ -1,0 +1,44 @@
+name: Sync new branch from fork
+
+on:
+  schedule:
+    # 北京时间每天 05:00 = UTC 前一天 21:00
+    - cron: '0 21 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-new-branch
+  cancel-in-progress: false
+
+jobs:
+  sync-new-branch:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout new branch
+        uses: actions/checkout@v4
+        with:
+          ref: new
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add remote and fetch all branch
+        run: |
+          git remote add new_origin https://github.com/caozhiyuan/copilot-api.git
+          git fetch new_origin all
+
+      - name: Merge new_origin/all into new
+        run: |
+          git checkout new
+          git merge --no-edit FETCH_HEAD
+
+      - name: Push new branch
+        run: |
+          git push origin new
