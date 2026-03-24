@@ -16,8 +16,8 @@ export interface AppConfig {
     "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
   >
   useFunctionApplyPatch?: boolean
-  compactUseSmallModel?: boolean
   useMessagesApi?: boolean
+  anthropicApiKey?: string
 }
 
 export interface ModelConfig {
@@ -32,6 +32,7 @@ export interface ProviderConfig {
   baseUrl?: string
   apiKey?: string
   models?: Record<string, ModelConfig>
+  adjustInputTokens?: boolean
 }
 
 export interface ResolvedProviderConfig {
@@ -40,6 +41,7 @@ export interface ResolvedProviderConfig {
   baseUrl: string
   apiKey: string
   models?: Record<string, ModelConfig>
+  adjustInputTokens?: boolean
 }
 
 const gpt5ExplorationPrompt = `## Exploration and reading files
@@ -77,6 +79,7 @@ const defaultConfig: AppConfig = {
   extraPrompts: {
     "gpt-5-mini": gpt5ExplorationPrompt,
     "gpt-5.3-codex": gpt5CommentaryPrompt,
+    "gpt-5.4-mini": gpt5CommentaryPrompt,
     "gpt-5.4": gpt5CommentaryPrompt,
   },
   smallModel: "gpt-5-mini",
@@ -84,10 +87,10 @@ const defaultConfig: AppConfig = {
   modelReasoningEfforts: {
     "gpt-5-mini": "low",
     "gpt-5.3-codex": "xhigh",
+    "gpt-5.4-mini": "xhigh",
     "gpt-5.4": "xhigh",
   },
   useFunctionApplyPatch: true,
-  compactUseSmallModel: true,
   useMessagesApi: true,
 }
 
@@ -228,11 +231,6 @@ export function getReasoningEffortForModel(
   return config.modelReasoningEfforts?.[model] ?? "high"
 }
 
-export function shouldCompactUseSmallModel(): boolean {
-  const config = getConfig()
-  return config.compactUseSmallModel ?? true
-}
-
 export function normalizeProviderBaseUrl(url: string): string {
   return url.trim().replace(/\/+$/u, "")
 }
@@ -276,6 +274,7 @@ export function getProviderConfig(name: string): ResolvedProviderConfig | null {
     baseUrl,
     apiKey,
     models: provider.models,
+    adjustInputTokens: provider.adjustInputTokens,
   }
 }
 
@@ -288,4 +287,9 @@ export function listEnabledProviders(): Array<string> {
 export function isMessagesApiEnabled(): boolean {
   const config = getConfig()
   return config.useMessagesApi ?? true
+}
+
+export function getAnthropicApiKey(): string | undefined {
+  const config = getConfig()
+  return config.anthropicApiKey ?? process.env.ANTHROPIC_API_KEY ?? undefined
 }
