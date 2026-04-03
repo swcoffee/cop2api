@@ -16,6 +16,8 @@ concurrency:
 jobs:
   sync-new-branch:
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - name: Checkout new branch
@@ -23,6 +25,7 @@ jobs:
         with:
           ref: new
           fetch-depth: 0
+          token: ${{ secrets.PAT_TOKEN }}
 
       - name: Configure git
         run: |
