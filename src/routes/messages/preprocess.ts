@@ -16,6 +16,7 @@ const compactTextOnlyGuard =
 const compactSummaryPromptStart =
   "Your task is to create a detailed summary of the conversation so far"
 const compactMessageSections = ["Pending Tasks:", "Current Work:"] as const
+export const TOOL_REFERENCE_TURN_BOUNDARY = "Tool loaded."
 
 const getAnthropicEffortForModel = (
   model: string,
@@ -87,6 +88,10 @@ const mergeContentWithText = (
   if (typeof tr.content === "string") {
     return { ...tr, content: `${tr.content}\n\n${textBlock.text}` }
   }
+  // Unable to merge, discard other text blocks, wait for the next round of re-request
+  if (hasToolRef(tr)) {
+    return tr
+  }
   return {
     ...tr,
     content: [...tr.content, textBlock],
@@ -100,6 +105,10 @@ const mergeContentWithTexts = (
   if (typeof tr.content === "string") {
     const appendedTexts = textBlocks.map((tb) => tb.text).join("\n\n")
     return { ...tr, content: `${tr.content}\n\n${appendedTexts}` }
+  }
+  // Unable to merge, discard other text blocks, wait for the next round of re-request
+  if (hasToolRef(tr)) {
+    return tr
   }
   return { ...tr, content: [...tr.content, ...textBlocks] }
 }
@@ -116,6 +125,25 @@ const mergeToolResult = (
   return toolResults.map((tr, i) =>
     i === lastIndex ? mergeContentWithTexts(tr, textBlocks) : tr,
   )
+}
+
+export const stripToolReferenceTurnBoundary = (
+  anthropicPayload: AnthropicMessagesPayload,
+): void => {
+  for (const msg of anthropicPayload.messages) {
+    if (msg.role !== "user" || !Array.isArray(msg.content)) continue
+
+    const hasToolReference = msg.content.some(
+      (block) => block.type === "tool_result" && hasToolRef(block),
+    )
+    if (!hasToolReference) continue
+
+    msg.content = msg.content.filter(
+      (block) =>
+        block.type !== "text"
+        || block.text.trim() !== TOOL_REFERENCE_TURN_BOUNDARY,
+    )
+  }
 }
 
 export const mergeToolResultForClaude = (
@@ -143,6 +171,13 @@ export const mergeToolResultForClaude = (
 
     msg.content = mergeToolResult(toolResults, textBlocks)
   }
+}
+
+const hasToolRef = (block: AnthropicToolResultBlock) => {
+  return (
+    Array.isArray(block.content)
+    && block.content.some((c) => c.type === "tool_reference")
+  )
 }
 
 // Strip cache_control from system content blocks as the
