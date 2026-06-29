@@ -1,18 +1,29 @@
 import consola from "consola"
 import { events } from "fetch-event-stream"
+import { createHash } from "node:crypto"
 
-import type { CompactType } from "~/lib/compact"
 import type { SubagentMarker } from "~/lib/subagent"
+import type { PooledWebSocketRequest } from "~/services/responses-websocket"
 
 import {
   copilotBaseUrl,
   copilotHeaders,
+  copilotWebSocketHeaders,
   prepareForCompact,
   prepareInteractionHeaders,
 } from "~/lib/api-config"
-import { logCopilotRateLimits } from "~/lib/copilot-rate-limit"
+import { COMPACT_REQUEST, type CompactType } from "~/lib/compact"
+import {
+  logCopilotQuotaSnapshots,
+  logCopilotRateLimits,
+  type CopilotQuotaSnapshot,
+} from "~/lib/copilot-rate-limit"
 import { HTTPError } from "~/lib/error"
 import { state } from "~/lib/state"
+import {
+  createPooledWebSocketStream,
+  createWebSocketUrl,
+} from "~/services/responses-websocket"
 
 export interface ResponsesPayload {
   model: string
@@ -27,6 +38,7 @@ export interface ResponsesPayload {
   stream?: boolean | null
   safety_identifier?: string | null
   prompt_cache_key?: string | null
+  prompt_cache_retention?: "in_memory" | "24h" | null
   parallel_tool_calls?: boolean | null
   store?: boolean | null
   reasoning?: Reasoning | null
@@ -37,13 +49,18 @@ export interface ResponsesPayload {
 }
 
 export type ToolChoiceOptions = "none" | "auto" | "required"
+export type ToolSearchExecution = "client" | "server"
 
 export interface ToolChoiceFunction {
   name: string
   type: "function"
 }
 
-export type Tool = FunctionTool | Record<string, unknown>
+export type Tool =
+  | FunctionTool
+  | ToolSearchTool
+  | NamespaceTool
+  | Record<string, unknown>
 
 export interface FunctionTool {
   name: string
@@ -51,14 +68,32 @@ export interface FunctionTool {
   strict: boolean | null
   type: "function"
   description?: string | null
+  defer_loading?: boolean | null
+}
+
+export interface ToolSearchTool {
+  type: "tool_search"
+  execution?: ToolSearchExecution | null
+  description?: string | null
+  parameters?: { [key: string]: unknown } | null
+}
+
+export interface NamespaceTool {
+  type: "namespace"
+  name: string
+  description?: string | null
+  tools: Array<FunctionTool>
 }
 
 export type ResponseIncludable =
   | "file_search_call.results"
+  | "web_search_call.results"
+  | "web_search_call.action.sources"
   | "message.input_image.image_url"
   | "computer_call_output.output.image_url"
   | "reasoning.encrypted_content"
   | "code_interpreter_call.outputs"
+  | "message.output_text.logprobs"
 
 export interface Reasoning {
   effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | null
@@ -87,12 +122,29 @@ export interface ResponseFunctionToolCallItem {
   name: string
   arguments: string
   status?: "in_progress" | "completed" | "incomplete"
+  namespace?: string | null
 }
 
 export interface ResponseFunctionCallOutputItem {
   type: "function_call_output"
   call_id: string
   output: string | Array<ResponseInputContent>
+  status?: "in_progress" | "completed" | "incomplete"
+}
+
+export interface ResponseToolSearchCallItem {
+  type: "tool_search_call"
+  call_id: string
+  arguments: Record<string, unknown> | string
+  execution?: ToolSearchExecution | null
+  status?: "in_progress" | "completed" | "incomplete"
+}
+
+export interface ResponseToolSearchOutputItem {
+  type: "tool_search_output"
+  call_id: string
+  tools: Array<Tool>
+  execution?: ToolSearchExecution | null
   status?: "in_progress" | "completed" | "incomplete"
 }
 
@@ -112,12 +164,19 @@ export interface ResponseInputCompaction {
   encrypted_content: string
 }
 
+export interface ResponseInputCompactionTrigger {
+  type: "compaction_trigger"
+}
+
 export type ResponseInputItem =
   | ResponseInputMessage
   | ResponseFunctionToolCallItem
   | ResponseFunctionCallOutputItem
+  | ResponseToolSearchCallItem
+  | ResponseToolSearchOutputItem
   | ResponseInputReasoning
   | ResponseInputCompaction
+  | ResponseInputCompactionTrigger
   | Record<string, unknown>
 
 export type ResponseInputContent =
@@ -153,6 +212,7 @@ export interface ResponsesResult {
   output: Array<ResponseOutputItem>
   output_text: string
   status: string
+  copilot_usage?: CopilotUsage | null
   usage?: ResponseUsage | null
   error: ResponseError | null
   incomplete_details: IncompleteDetails | null
@@ -165,6 +225,10 @@ export interface ResponsesResult {
   top_p: number | null
 }
 
+export interface CopilotUsage {
+  total_nano_aiu?: number | null
+}
+
 export type Metadata = { [key: string]: string }
 
 export interface IncompleteDetails {
@@ -172,6 +236,7 @@ export interface IncompleteDetails {
 }
 
 export interface ResponseError {
+  code: string | null
   message: string
 }
 
@@ -179,6 +244,9 @@ export type ResponseOutputItem =
   | ResponseOutputMessage
   | ResponseOutputReasoning
   | ResponseOutputFunctionCall
+  | ResponseOutputToolSearchCall
+  | ResponseOutputToolSearchOutput
+  | ResponseOutputWebSearchCall
   | ResponseOutputCompaction
 
 export interface ResponseOutputMessage {
@@ -209,6 +277,39 @@ export interface ResponseOutputFunctionCall {
   name: string
   arguments: string
   status?: "in_progress" | "completed" | "incomplete"
+  namespace?: string | null
+}
+
+export interface ResponseOutputToolSearchCall {
+  id?: string
+  type: "tool_search_call"
+  call_id: string
+  arguments: Record<string, unknown> | string
+  execution?: ToolSearchExecution | null
+  status?: "in_progress" | "completed" | "incomplete"
+}
+
+export interface ResponseOutputToolSearchOutput {
+  id?: string
+  type: "tool_search_output"
+  call_id: string
+  tools: Array<Tool>
+  execution?: ToolSearchExecution | null
+  status?: "in_progress" | "completed" | "incomplete"
+}
+
+export interface ResponseOutputWebSearchCall {
+  id?: string
+  type: "web_search_call"
+  action?: {
+    query?: string
+    queries?: Array<string>
+    sources?: Array<{ type?: "url"; url: string }>
+    type?: string
+    url?: string
+    pattern?: string
+  }
+  status?: "in_progress" | "searching" | "completed" | "failed"
 }
 
 export interface ResponseOutputCompaction {
@@ -249,24 +350,36 @@ export type ResponseStreamEvent =
   | ResponseCompletedEvent
   | ResponseIncompleteEvent
   | ResponseCreatedEvent
+  | ResponseInProgressEvent
   | ResponseErrorEvent
   | ResponseFunctionCallArgumentsDeltaEvent
   | ResponseFunctionCallArgumentsDoneEvent
   | ResponseFailedEvent
   | ResponseOutputItemAddedEvent
   | ResponseOutputItemDoneEvent
+  | ResponseContentPartAddedEvent
+  | ResponseOutputTextAnnotationAddedEvent
+  | ResponseContentPartDoneEvent
+  | ResponseWebSearchCallInProgressEvent
+  | ResponseWebSearchCallSearchingEvent
+  | ResponseWebSearchCallCompletedEvent
+  | ResponseReasoningSummaryPartAddedEvent
+  | ResponseReasoningSummaryPartDoneEvent
   | ResponseReasoningSummaryTextDeltaEvent
   | ResponseReasoningSummaryTextDoneEvent
   | ResponseTextDeltaEvent
   | ResponseTextDoneEvent
 
 export interface ResponseCompletedEvent {
+  copilot_quota_snapshots?: Record<string, CopilotQuotaSnapshot>
+  copilot_usage?: CopilotUsage | null
   response: ResponsesResult
   sequence_number: number
   type: "response.completed"
 }
 
 export interface ResponseIncompleteEvent {
+  copilot_usage?: CopilotUsage | null
   response: ResponsesResult
   sequence_number: number
   type: "response.incomplete"
@@ -278,12 +391,25 @@ export interface ResponseCreatedEvent {
   type: "response.created"
 }
 
+export interface ResponseInProgressEvent {
+  response: ResponsesResult
+  sequence_number: number
+  type: "response.in_progress"
+}
+
 export interface ResponseErrorEvent {
   code: string | null
   message: string
   param: string | null
   sequence_number: number
   type: "error"
+  error?: {
+    type?: string | null
+    code: string | null
+    message: string
+  }
+  status_code?: number
+  headers?: Record<string, string>
 }
 
 export interface ResponseFunctionCallArgumentsDeltaEvent {
@@ -304,6 +430,7 @@ export interface ResponseFunctionCallArgumentsDoneEvent {
 }
 
 export interface ResponseFailedEvent {
+  copilot_usage?: CopilotUsage | null
   response: ResponsesResult
   sequence_number: number
   type: "response.failed"
@@ -321,6 +448,73 @@ export interface ResponseOutputItemDoneEvent {
   output_index: number
   sequence_number: number
   type: "response.output_item.done"
+}
+
+export interface ResponseContentPartAddedEvent {
+  content_index: number
+  item_id: string
+  output_index: number
+  part: ResponseOutputContentBlock
+  sequence_number: number
+  type: "response.content_part.added"
+}
+
+export interface ResponseOutputTextAnnotationAddedEvent {
+  annotation: unknown
+  annotation_index?: number
+  content_index: number
+  item_id: string
+  output_index: number
+  sequence_number: number
+  type: "response.output_text.annotation.added"
+}
+
+export interface ResponseContentPartDoneEvent {
+  content_index: number
+  item_id: string
+  output_index: number
+  part: ResponseOutputContentBlock
+  sequence_number: number
+  type: "response.content_part.done"
+}
+
+export interface ResponseWebSearchCallInProgressEvent {
+  item_id: string
+  output_index: number
+  sequence_number: number
+  type: "response.web_search_call.in_progress"
+}
+
+export interface ResponseWebSearchCallSearchingEvent {
+  item_id: string
+  output_index: number
+  sequence_number: number
+  type: "response.web_search_call.searching"
+}
+
+export interface ResponseWebSearchCallCompletedEvent {
+  item_id: string
+  output_index: number
+  sequence_number: number
+  type: "response.web_search_call.completed"
+}
+
+export interface ResponseReasoningSummaryPartAddedEvent {
+  item_id: string
+  output_index: number
+  part: ResponseReasoningBlock
+  sequence_number: number
+  summary_index: number
+  type: "response.reasoning_summary_part.added"
+}
+
+export interface ResponseReasoningSummaryPartDoneEvent {
+  item_id: string
+  output_index: number
+  part: ResponseReasoningBlock
+  sequence_number: number
+  summary_index: number
+  type: "response.reasoning_summary_part.done"
 }
 
 export interface ResponseReasoningSummaryTextDeltaEvent {
@@ -361,6 +555,13 @@ export interface ResponseTextDoneEvent {
 
 export type ResponsesStream = ReturnType<typeof events>
 export type CreateResponsesReturn = ResponsesResult | ResponsesStream
+export type ResponsesTransport = "http" | "websocket"
+
+type ResponsesStreamChunk = {
+  data?: string
+  event?: string
+  id?: string | number
+}
 
 interface ResponsesRequestOptions {
   vision: boolean
@@ -369,6 +570,7 @@ interface ResponsesRequestOptions {
   requestId: string
   sessionId?: string
   compactType?: CompactType
+  transport?: ResponsesTransport
 }
 
 export const createResponses = async (
@@ -380,6 +582,7 @@ export const createResponses = async (
     requestId,
     sessionId,
     compactType,
+    transport = "http",
   }: ResponsesRequestOptions,
 ): Promise<CreateResponsesReturn> => {
   if (!state.copilotToken) throw new Error("Copilot token not found")
@@ -398,6 +601,29 @@ export const createResponses = async (
 
   consola.log(`<-- model: ${payload.model}`)
 
+  const effectiveTransport =
+    compactType === COMPACT_REQUEST ? "http" : transport
+
+  if (payload.stream === true && effectiveTransport === "websocket") {
+    const websocketRequest = prepareResponsesWebSocketRequest(
+      payload,
+      headers,
+      {
+        requestId,
+        subagentMarker,
+      },
+    )
+    const stream = createPooledResponsesWebSocketStream(websocketRequest)
+    return stream
+  }
+
+  return await createHttpResponses(payload, headers)
+}
+
+const createHttpResponses = async (
+  payload: ResponsesPayload,
+  headers: Record<string, string>,
+): Promise<CreateResponsesReturn> => {
   const response = await fetch(`${copilotBaseUrl(state)}/responses`, {
     method: "POST",
     headers,
@@ -416,4 +642,203 @@ export const createResponses = async (
   }
 
   return (await response.json()) as ResponsesResult
+}
+
+type ResponsesWebSocketPayload = ResponsesPayload & {
+  type: "response.create"
+  initiator: "agent" | "user"
+}
+
+type ResponsesWebSocketRequest =
+  PooledWebSocketRequest<ResponsesWebSocketPayload>
+
+export const prepareResponsesWebSocketRequest = (
+  payload: ResponsesPayload,
+  preparedHeaders: Record<string, string>,
+  options: {
+    requestId: string
+    subagentMarker?: SubagentMarker | null
+  },
+): ResponsesWebSocketRequest => {
+  const initiator = getResponsesWebSocketInitiator(preparedHeaders)
+
+  return {
+    headers: copilotWebSocketHeaders(preparedHeaders),
+    poolKey: buildResponsesWebSocketPoolKey(payload, options),
+    payload: buildResponsesWebSocketPayload(payload, initiator),
+    url: buildResponsesWebSocketUrl(copilotBaseUrl(state)),
+  }
+}
+
+export const buildResponsesWebSocketPoolKey = (
+  payload: ResponsesPayload,
+  {
+    requestId,
+    subagentMarker,
+  }: {
+    requestId: string
+    subagentMarker?: SubagentMarker | null
+  },
+): string => {
+  const tokenFingerprint =
+    state.copilotToken ?
+      createHash("sha256").update(state.copilotToken).digest("hex").slice(0, 16)
+    : "missing-token"
+  const subagentKey =
+    subagentMarker ?
+      [
+        subagentMarker.session_id,
+        subagentMarker.agent_id,
+        subagentMarker.agent_type,
+      ].join(":")
+    : "main"
+
+  return [tokenFingerprint, payload.model, requestId, subagentKey]
+    .map(encodePoolKeyPart)
+    .join("|")
+}
+
+export const getResponsesWebSocketInitiator = (
+  preparedHeaders: Record<string, string>,
+): "agent" | "user" => {
+  const initiator = getHeaderValue(preparedHeaders, "x-initiator")
+  return initiator?.toLowerCase() === "agent" ? "agent" : "user"
+}
+
+const createPooledResponsesWebSocketStream = (
+  request: ResponsesWebSocketRequest,
+): ResponsesStream =>
+  createResponsesSafeStream(
+    createPooledWebSocketStream(request, {
+      createChunk: createResponsesWebSocketStreamChunk,
+      isTerminalChunk: isTerminalResponsesStreamChunk,
+      openErrorMessage: "Failed to create responses websocket",
+      streamErrorMessage: "Responses websocket stream error",
+      terminalChunkMissingMessage:
+        "Responses websocket ended without a terminal response",
+    }),
+  )
+
+const createResponsesSafeStream = async function* (
+  source: AsyncIterable<ResponsesStreamChunk>,
+): AsyncGenerator<ResponsesStreamChunk, void, unknown> {
+  try {
+    yield* source
+  } catch (error) {
+    yield createResponsesErrorServerSentEventChunk(getErrorMessage(error))
+  }
+}
+
+export const buildResponsesWebSocketPayload = (
+  payload: ResponsesPayload,
+  initiator: "agent" | "user",
+): ResponsesWebSocketPayload => {
+  const websocketPayload: ResponsesWebSocketPayload = {
+    ...payload,
+    type: "response.create",
+    initiator,
+  }
+
+  delete websocketPayload.stream
+  delete websocketPayload["background"]
+  delete websocketPayload.service_tier
+
+  return websocketPayload
+}
+
+export const buildResponsesWebSocketUrl = (baseUrl: string): string => {
+  return createWebSocketUrl(`${baseUrl.replace(/\/+$/u, "")}/responses`)
+}
+
+const getHeaderValue = (
+  headers: Record<string, string>,
+  headerName: string,
+): string | undefined => {
+  const normalizedHeaderName = headerName.toLowerCase()
+  const match = Object.entries(headers).find(
+    ([key]) => key.toLowerCase() === normalizedHeaderName,
+  )
+
+  return match?.[1]
+}
+
+const encodePoolKeyPart = (value: string): string => encodeURIComponent(value)
+
+const createResponsesWebSocketStreamChunk = (
+  data: string,
+): { data?: string; event?: string; id?: string } => {
+  if (data === "[DONE]") {
+    return { data }
+  }
+
+  try {
+    const parsed = JSON.parse(data) as {
+      copilot_quota_snapshots?: Record<string, CopilotQuotaSnapshot>
+      id?: unknown
+      type?: unknown
+      error?: {
+        code: string | null
+        message: string
+      }
+      code?: string | null
+      message?: string
+    }
+    if (parsed.type === "response.completed") {
+      logCopilotQuotaSnapshots(parsed.copilot_quota_snapshots)
+    }
+    if (parsed.type === "error" && parsed.error) {
+      parsed.code = parsed.error.code
+      parsed.message = parsed.error.message
+    }
+    return {
+      event: typeof parsed.type === "string" ? parsed.type : undefined,
+      data: JSON.stringify(parsed),
+      id: typeof parsed.id === "string" ? parsed.id : undefined,
+    }
+  } catch {
+    return { data }
+  }
+}
+
+const isTerminalResponsesStreamChunk = (chunk: { data?: string }): boolean => {
+  if (!chunk.data || chunk.data === "[DONE]") {
+    return false
+  }
+
+  try {
+    const parsed = JSON.parse(chunk.data) as { type?: unknown }
+    return (
+      parsed.type === "response.completed"
+      || parsed.type === "response.failed"
+      || parsed.type === "response.incomplete"
+      || parsed.type === "error"
+    )
+  } catch {
+    return false
+  }
+}
+
+const createResponsesErrorServerSentEventChunk = (
+  message: string,
+): ResponsesStreamChunk => {
+  const errorEvent: ResponseErrorEvent = {
+    code: null,
+    message,
+    param: null,
+    sequence_number: 0,
+    type: "error",
+  }
+
+  return {
+    event: errorEvent.type,
+    data: JSON.stringify(errorEvent),
+  }
+}
+
+const getErrorMessage = (error: unknown): string => {
+  if (error instanceof Error && error.message) {
+    return error.message
+  }
+
+  return String(error)
 }

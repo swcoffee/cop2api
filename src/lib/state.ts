@@ -4,7 +4,12 @@ import type { ModelsResponse } from "~/services/copilot/get-models"
 
 export interface State {
   githubToken?: string
+  userName?: string
   copilotToken?: string
+  codexAccessToken?: string
+  codexRefreshToken?: string
+  codexExpiresAt?: number
+  codexAccountId?: string
 
   accountType: string
   models?: ModelsResponse
@@ -14,22 +19,16 @@ export interface State {
   vsCodeSessionId?: string
   vsCodeDeviceId: string
 
-  manualApprove: boolean
-  rateLimitWait: boolean
   showToken: boolean
 
-  // Rate limiting configuration
-  rateLimitSeconds?: number
-  lastRequestTimestamp?: number
   verbose: boolean
 
   copilotApiUrl?: string
+  tokenBasedBilling?: boolean
 }
 
 export const state: State = {
   accountType: "individual",
-  manualApprove: false,
-  rateLimitWait: false,
   showToken: false,
   verbose: false,
   vsCodeDeviceId: randomUUID(),

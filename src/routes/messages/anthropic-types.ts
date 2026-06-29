@@ -2,7 +2,8 @@
 
 export interface AnthropicMessagesPayload {
   model: string
-  messages: Array<AnthropicMessage>
+  messages: Array<AnthropicInputMessage>
+  cache_control?: AnthropicCacheControl | null
   system?: string | Array<AnthropicTextBlock>
   stop_sequences?: Array<string>
   stream?: boolean
@@ -22,6 +23,7 @@ export interface AnthropicMessagesPayload {
   service_tier?: "auto" | "standard_only"
   output_config?: {
     effort?: "low" | "medium" | "high" | "xhigh" | "max"
+    format?: BetaJSONOutputFormat | null
   }
   metadata?: {
     user_id?: string
@@ -29,9 +31,23 @@ export interface AnthropicMessagesPayload {
   temperature?: number
 }
 
+export interface BetaJSONOutputFormat {
+  schema: { [key: string]: unknown }
+
+  type: "json_schema"
+}
+
+export interface AnthropicCacheControl {
+  type: "ephemeral"
+  ttl?: "5m" | "1h"
+  scope?: string
+  [key: string]: unknown
+}
+
 export interface AnthropicTextBlock {
   type: "text"
   text: string
+  cache_control?: AnthropicCacheControl | null
 }
 
 export interface AnthropicImageBlock {
@@ -41,6 +57,7 @@ export interface AnthropicImageBlock {
     media_type: "image/jpeg" | "image/png" | "image/gif" | "image/webp"
     data: string
   }
+  cache_control?: AnthropicCacheControl | null
 }
 
 export interface AnthropicDocumentBlock {
@@ -51,11 +68,13 @@ export interface AnthropicDocumentBlock {
     data: string
   }
   title?: string | null
+  cache_control?: AnthropicCacheControl | null
 }
 
 export interface AnthropicToolReferenceBlock {
   type: "tool_reference"
   tool_name: string
+  cache_control?: AnthropicCacheControl | null
 }
 
 export type AnthropicToolResultContentBlock =
@@ -69,6 +88,7 @@ export interface AnthropicToolResultBlock {
   tool_use_id: string
   content: string | Array<AnthropicToolResultContentBlock>
   is_error?: boolean
+  cache_control?: AnthropicCacheControl | null
 }
 
 export interface AnthropicToolUseBlock {
@@ -76,6 +96,7 @@ export interface AnthropicToolUseBlock {
   id: string
   name: string
   input: Record<string, unknown>
+  cache_control?: AnthropicCacheControl | null
 }
 
 export interface AnthropicThinkingBlock {
@@ -105,20 +126,93 @@ export interface AnthropicAssistantMessage {
   content: string | Array<AnthropicAssistantContentBlock>
 }
 
+export interface AnthropicSystemMessage {
+  role: "system"
+  content: string | Array<AnthropicTextBlock>
+}
+
 export type AnthropicMessage = AnthropicUserMessage | AnthropicAssistantMessage
+export type AnthropicInputMessage = AnthropicMessage | AnthropicSystemMessage
 
 export interface AnthropicTool {
   name: string
   description?: string
   input_schema: Record<string, unknown>
   defer_loading?: boolean
+  cache_control?: AnthropicCacheControl | null
+  // Server-side tool fields (e.g. web_search_20250305). Server tools carry a
+  // `type` and omit `input_schema`; these stay optional so the same interface
+  // can describe both custom and server tools without rippling type changes.
+  type?: string
+  max_uses?: number
+  allowed_domains?: Array<string>
+  blocked_domains?: Array<string>
+  user_location?: Record<string, unknown>
 }
 
-export interface AnthropicResponse {
+// --- Web search result blocks (Anthropic server tool shape) ---------------
+// Emitted in the assistant response when the proxy fulfills a web_search tool.
+
+export interface AnthropicWebSearchResultItem {
+  type: "web_search_result"
+  url: string
+  title: string
+  page_age?: string | null
+  encrypted_content?: string
+}
+
+export interface AnthropicServerToolUseBlock {
+  type: "server_tool_use"
+  id: string
+  name: "web_search"
+  input: Record<string, unknown>
+}
+
+export interface AnthropicWebSearchToolResultErrorBlock {
+  type: "web_search_tool_result_error"
+  error_code: string
+}
+
+export interface AnthropicWebSearchToolResultBlock {
+  type: "web_search_tool_result"
+  tool_use_id: string
+  content:
+    | Array<AnthropicWebSearchResultItem>
+    | AnthropicWebSearchToolResultErrorBlock
+}
+
+export type AnthropicWebSearchContentBlock =
+  | AnthropicServerToolUseBlock
+  | AnthropicWebSearchToolResultBlock
+
+export interface AnthropicUsage {
+  input_tokens: number
+  output_tokens: number
+  cache_creation_input_tokens?: number
+  cache_read_input_tokens?: number
+  service_tier?: "standard" | "priority" | "batch"
+  server_tool_use?: {
+    web_search_requests?: number
+  }
+}
+
+export interface CopilotUsage {
+  total_nano_aiu?: number | null
+}
+
+export type AnthropicResponseContentBlock =
+  | AnthropicAssistantContentBlock
+  | AnthropicWebSearchContentBlock
+
+export interface AnthropicResponse<
+  TContentBlock extends
+    AnthropicResponseContentBlock = AnthropicResponseContentBlock,
+> {
   id: string
   type: "message"
   role: "assistant"
-  content: Array<AnthropicAssistantContentBlock>
+  content: Array<TContentBlock>
+  copilot_usage?: CopilotUsage | null
   model: string
   stop_reason:
     | "end_turn"
@@ -129,16 +223,8 @@ export interface AnthropicResponse {
     | "refusal"
     | null
   stop_sequence: string | null
-  usage: {
-    input_tokens: number
-    output_tokens: number
-    cache_creation_input_tokens?: number
-    cache_read_input_tokens?: number
-    service_tier?: "standard" | "priority" | "batch"
-  }
+  usage: AnthropicUsage
 }
-
-export type AnthropicResponseContentBlock = AnthropicAssistantContentBlock
 
 // Anthropic Stream Event Types
 export interface AnthropicMessageStartEvent {
@@ -162,6 +248,8 @@ export interface AnthropicContentBlockStartEvent {
         input: Record<string, unknown>
       })
     | { type: "thinking"; thinking: string }
+    | AnthropicServerToolUseBlock
+    | AnthropicWebSearchToolResultBlock
 }
 
 export interface AnthropicContentBlockDeltaEvent {
@@ -181,6 +269,7 @@ export interface AnthropicContentBlockStopEvent {
 
 export interface AnthropicMessageDeltaEvent {
   type: "message_delta"
+  copilot_usage?: CopilotUsage | null
   delta: {
     stop_reason?: AnthropicResponse["stop_reason"]
     stop_sequence?: string | null
@@ -225,6 +314,8 @@ export interface AnthropicStreamState {
   contentBlockIndex: number
   contentBlockOpen: boolean
   thinkingBlockOpen: boolean
+  pendingMessageDelta?: AnthropicMessageDeltaEvent
+  deferredContent?: string
   toolCalls: {
     [openAIToolIndex: number]: {
       id: string

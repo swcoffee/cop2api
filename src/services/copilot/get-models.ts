@@ -1,10 +1,12 @@
 import consola from "consola"
 
 import { copilotBaseUrl, copilotModelsHeaders } from "~/lib/api-config"
+
 import { HTTPError } from "~/lib/error"
 import { state } from "~/lib/state"
 
 export const getModels = async () => {
+  consola.info(`Fetching models from ${copilotBaseUrl(state)}/models`)
   const response = await fetch(`${copilotBaseUrl(state)}/models`, {
     headers: copilotModelsHeaders(state),
   })
@@ -30,6 +32,11 @@ interface ModelLimits {
   max_output_tokens?: number
   max_prompt_tokens?: number
   max_inputs?: number
+  vision?: {
+    max_prompt_image_size?: number
+    max_prompt_images?: number
+    supported_media_types?: Array<string>
+  }
 }
 
 interface ModelSupports {
