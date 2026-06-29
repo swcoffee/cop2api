@@ -32,12 +32,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Add remote and fetch all branch
+      - name: Add remote and fetch dev branch
         run: |
           git remote add new_origin https://github.com/caozhiyuan/copilot-api.git
-          git fetch new_origin all
+          git fetch new_origin dev
 
-      - name: Merge new_origin/all into new
+      - name: Merge new_origin/dev into new
         run: |
           git checkout new
           git merge --no-edit FETCH_HEAD
