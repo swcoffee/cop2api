@@ -1,4 +1,4 @@
-import type { Model } from "~/services/copilot/get-models"
+import type { Model } from "~/lib/types/models"
 
 import {
   COMPACT_AUTO_CONTINUE,
@@ -26,7 +26,7 @@ import type {
   AnthropicToolResultContentBlock,
   AnthropicUserContentBlock,
   AnthropicUserMessage,
-} from "./anthropic-types"
+} from "~/lib/types/anthropic"
 
 export const TOOL_REFERENCE_TURN_BOUNDARY = "Tool loaded."
 const SYSTEM_REMINDER_START = "<system-reminder>"

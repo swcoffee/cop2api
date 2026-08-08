@@ -14,6 +14,7 @@ import {
   normalizeResponsesUsage,
   type UsageTokens,
 } from "~/lib/token-usage"
+import { isResponsesStream } from "~/lib/utils"
 import {
   applyResponsesApiContextManagement,
   compactInputByLatestCompaction,
@@ -24,7 +25,7 @@ import type {
   ResponsesResult,
   ResponseStreamEvent,
   ResponsesStream,
-} from "~/services/copilot/create-responses"
+} from "~/lib/types/responses"
 import { forwardCodexResponses } from "~/services/codex/create-responses"
 import { getModels as getCodexModels } from "~/services/codex/get-models"
 import {
@@ -298,10 +299,3 @@ const getResponsesStreamEventUsage = (
 
 const getResponsesEvents = (response: Response): ResponsesStream =>
   events(response)
-
-const isResponsesStream = (value: unknown): value is ResponsesStream => {
-  return (
-    Boolean(value)
-    && typeof (value as ResponsesStream)[Symbol.asyncIterator] === "function"
-  )
-}

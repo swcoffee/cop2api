@@ -1,6 +1,6 @@
 import type { Context } from "hono"
 
-import type { Model } from "~/services/copilot/get-models"
+import type { Model } from "~/lib/types/models"
 
 import { COMPACT_REQUEST } from "~/lib/compact"
 import {
@@ -21,7 +21,7 @@ import {
 import { handleProviderMessagesForProvider } from "~/routes/provider/messages/handler"
 import { getResponsesTransportForModel } from "~/routes/responses/utils"
 
-import type { AnthropicMessagesPayload } from "./anthropic-types"
+import type { AnthropicMessagesPayload } from "~/lib/types/anthropic"
 import {
   handleWithChatCompletions,
   handleWithMessagesApi,
