@@ -9,7 +9,7 @@ export interface ResponsesPayload {
   instructions?: string | null
   input?: string | Array<ResponseInputItem>
   tools?: Array<Tool> | null
-  tool_choice?: ToolChoiceOptions | ToolChoiceFunction
+  tool_choice?: ToolChoiceOptions | ToolChoiceFunction | ToolChoiceCustom
   temperature?: number | null
   top_p?: number | null
   max_output_tokens?: number | null
@@ -35,8 +35,14 @@ export interface ToolChoiceFunction {
   type: "function"
 }
 
+export interface ToolChoiceCustom {
+  name: string
+  type: "custom"
+}
+
 export type Tool =
   | FunctionTool
+  | CustomTool
   | ToolSearchTool
   | NamespaceTool
   | Record<string, unknown>
@@ -48,6 +54,16 @@ export interface FunctionTool {
   type: "function"
   description?: string | null
   defer_loading?: boolean | null
+}
+
+export interface CustomTool {
+  type: "custom"
+  name: string
+  description?: string | null
+  format?:
+    | { type: "text" }
+    | { type: "grammar"; syntax: "lark" | "regex"; definition: string }
+    | null
 }
 
 export interface ToolSearchTool {
@@ -104,6 +120,24 @@ export interface ResponseInputMessage {
   phase?: "commentary" | "final_answer"
 }
 
+export interface ResponseInputAgentMessage {
+  id?: string
+  type: "agent_message"
+  author: string
+  recipient: string
+  content: Array<ResponseInputAgentMessageContent>
+}
+
+export type ResponseInputAgentMessageContent =
+  | {
+      type: "input_text"
+      text: string
+    }
+  | {
+      type: "encrypted_content"
+      encrypted_content: string
+    }
+
 export interface ResponseFunctionToolCallItem {
   type: "function_call"
   call_id: string
@@ -115,6 +149,21 @@ export interface ResponseFunctionToolCallItem {
 
 export interface ResponseFunctionCallOutputItem {
   type: "function_call_output"
+  call_id: string
+  output: string | Array<ResponseInputContent>
+  status?: "in_progress" | "completed" | "incomplete"
+}
+
+export interface ResponseCustomToolCallItem {
+  type: "custom_tool_call"
+  call_id: string
+  name: string
+  input: string
+  status?: "in_progress" | "completed" | "incomplete"
+}
+
+export interface ResponseCustomToolCallOutputItem {
+  type: "custom_tool_call_output"
   call_id: string
   output: string | Array<ResponseInputContent>
   status?: "in_progress" | "completed" | "incomplete"
@@ -165,8 +214,11 @@ export interface ResponseInputAdditionalTools {
 
 export type ResponseInputItem =
   | ResponseInputMessage
+  | ResponseInputAgentMessage
   | ResponseFunctionToolCallItem
   | ResponseFunctionCallOutputItem
+  | ResponseCustomToolCallItem
+  | ResponseCustomToolCallOutputItem
   | ResponseToolSearchCallItem
   | ResponseToolSearchOutputItem
   | ResponseInputReasoning
@@ -240,6 +292,7 @@ export type ResponseOutputItem =
   | ResponseOutputMessage
   | ResponseOutputReasoning
   | ResponseOutputFunctionCall
+  | ResponseOutputCustomToolCall
   | ResponseOutputToolSearchCall
   | ResponseOutputToolSearchOutput
   | ResponseOutputWebSearchCall
@@ -274,6 +327,15 @@ export interface ResponseOutputFunctionCall {
   arguments: string
   status?: "in_progress" | "completed" | "incomplete"
   namespace?: string | null
+}
+
+export interface ResponseOutputCustomToolCall {
+  id: string
+  type: "custom_tool_call"
+  call_id: string
+  name: string
+  input: string
+  status?: "in_progress" | "completed" | "incomplete"
 }
 
 export interface ResponseOutputToolSearchCall {
@@ -351,6 +413,8 @@ export type ResponseStreamEvent =
   | ResponseErrorEvent
   | ResponseFunctionCallArgumentsDeltaEvent
   | ResponseFunctionCallArgumentsDoneEvent
+  | ResponseCustomToolCallInputDeltaEvent
+  | ResponseCustomToolCallInputDoneEvent
   | ResponseFailedEvent
   | ResponseOutputItemAddedEvent
   | ResponseOutputItemDoneEvent
@@ -424,6 +488,23 @@ export interface ResponseFunctionCallArgumentsDoneEvent {
   output_index: number
   sequence_number: number
   type: "response.function_call_arguments.done"
+}
+
+export interface ResponseCustomToolCallInputDeltaEvent {
+  delta: string
+  item_id: string
+  output_index: number
+  sequence_number: number
+  type: "response.custom_tool_call_input.delta"
+}
+
+export interface ResponseCustomToolCallInputDoneEvent {
+  input: string
+  item_id: string
+  name: string
+  output_index: number
+  sequence_number: number
+  type: "response.custom_tool_call_input.done"
 }
 
 export interface ResponseFailedEvent {
