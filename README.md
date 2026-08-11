@@ -401,13 +401,10 @@ request_max_retries = 3
 stream_max_retries = 1
 stream_idle_timeout_ms = 300000
 
-[features.code_mode]
-excluded_tool_namespaces = [
-    "mcp__codex_apps__sites"
-]
-
 [features]
 remote_compaction_v2 = true
+# optional: set false only when the model does not support tool_search
+apps = false
 
 [analytics]
 enabled = false
@@ -416,7 +413,7 @@ enabled = false
 > [!NOTE]
 > `name` must be set to `"OpenAI"`.
 >
-> For models that do not support `tool_search`, we recommend disabling `mcp__codex_apps__sites` by adding it to `features.code_mode.excluded_tool_namespaces` as shown above. Otherwise, each prompt may consume more than 10,000 additional tokens.
+> For third-party models that do not support `tool_search`, we recommend disabling features.apps. Otherwise, each prompt may consume an additional 20,000 or more tokens.
 
 When a Codex client (`User-Agent` starts with `codex`) requests the top-level `GET /v1/models`, the gateway merges native Codex models with models available through the Messages adapter. The latter advertise `use_responses_lite: true`: `/v1/responses` uses **Responses → Messages** for Anthropic providers, while OpenAI-compatible providers and Chat-only Copilot models reuse the existing Messages route for **Responses → Messages → Chat Completions**, then translate streaming or JSON results back to Responses.
 
@@ -678,7 +675,11 @@ Use `copilot-api auth login --provider custom` to add or update another third-pa
     - `supportPdf` (optional): Controls whether the model supports PDF/document content. Defaults to `false`; unsupported PDFs are converted to a text notice. Set it to `true` to send PDF/document blocks as OpenAI Chat Completions file parts.
     - `toolContentSupportType` (optional): Tool result content capabilities for that model, as an array of `array`, `image`, and `pdf`. Provider routes default to string-only tool content when omitted. If `supportPdf` is `true` but this list does not include `pdf`, file parts in tool results are moved to user role messages. This provider default does not change the Copilot main flow, which continues to support array + image and not PDF.
     - `type` (optional): Per-model override of the provider protocol type. Supports `anthropic`, `openai-compatible`, and `openai-responses`. When set, the provider's `/v1/messages` route uses this model's type instead of the provider-level type for request routing, auth header resolution, and upstream endpoint selection. This is useful for providers like OpenCode Go whose upstream supports both OpenAI-compatible and Anthropic Messages APIs for different models. When the type is overridden, the auth header is resolved from the overridden type's default (Anthropic defaults to `x-api-key`; OpenAI-compatible/Responses default to `authorization`).
-    - `codex` (optional): Controls capability metadata when this model is merged into the Codex-UA model catalog. Supports `enabled`, `contextWindow`, `maxOutputTokens`, `inputModalities`, `reasoningEfforts`, `defaultReasoningEffort`, and `supportsParallelToolCalls`; set `enabled: false` to hide the model. When `reasoningEfforts` is not set, it defaults to `["high", "xhigh", "max"]` and `defaultReasoningEffort` defaults to `max`.
+    - `contextWindow` (optional): Context window token limit advertised when this model is merged into the Codex-UA model catalog; for example, `1000000` declares a 1M-token context window. Missing configured values use upstream metadata first, then the built-in non-GPT model catalog, then `256000`.
+    - `maxOutputTokens` (optional): Maximum output token limit advertised in the Codex-UA model catalog. Missing configured values use upstream metadata first, then the built-in non-GPT model catalog, where defaults are capped at `64000`, then `32000`.
+    - `inputModalities` (optional): Supported Codex input types. Use `["text", "image"]` for a model that accepts both text and images. Missing configured values use upstream metadata before the built-in non-GPT model catalog. GPT models do not receive these built-in capability defaults and continue to use the native Codex catalog or upstream metadata.
+    - `reasoningEfforts` (optional): Reasoning levels advertised for Codex. Defaults to `["high", "xhigh", "max", "ultra"]` when neither configuration nor upstream metadata provides a value.
+    - `defaultReasoningEffort` (optional): Default Codex reasoning level. Defaults to `max` when available, otherwise the first configured level. Synthetic Codex models always enable parallel tool calls.
 - **smallModel:** Fallback model used for tool-less warmup messages (e.g., Claude Code probe requests); defaults to gpt-5-mini. The gateway forces this small model on no-tool warmup or probe requests to avoid consuming premium requests. This behavior only applies to non-token-based-billing GitHub Copilot accounts (`token_based_billing` is false); for token-based-billing accounts the warmup small-model fallback is skipped since there is no premium-request quota to preserve.
 - **contextManagement:** Controls whether the proxy adds Responses API `context_management` compaction instructions. `messages` applies when Anthropic-style `/v1/messages` requests are translated to Responses API, including `openai-responses` provider message routes, and defaults to `true`. `responses` applies to native `/v1/responses` traffic, including `provider/model` aliases and the built-in `codex` provider, and defaults to `false`. Enable `responses` only after checking that your client supports context management compaction. When enabled, the request includes `context_management` in the body and keeps only the latest compaction carrier on follow-up turns. **Note:** Context management is forcibly disabled for GPT-5.6 and above models (e.g. `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`) because enabling it breaks prompt cache hits on those models. This override takes precedence over the `contextManagement` and `modelResponsesApiCompactThresholds` settings.
  - **modelResponsesApiCompactThresholds:** Per-model Responses API `compact_threshold` overrides used when the proxy adds `context_management`. These values take precedence over the fallback threshold from `resolveResponsesCompactThreshold` (`max_prompt_tokens * ratio`, or the default fallback). Defaults set `gpt-5.4` and `gpt-5.5` to `217600` (`272000 * 0.8`). Models not listed continue to use the normal fallback logic.

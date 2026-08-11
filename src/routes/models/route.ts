@@ -8,6 +8,7 @@ import {
   type ProviderType,
   type ResolvedProviderConfig,
 } from "~/lib/config"
+import { builtinProviderModelRegistry } from "~/lib/builtin-provider-models"
 import { forwardError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import { toClientModelId } from "~/lib/models"
@@ -64,6 +65,32 @@ function getStringField(
   return typeof value === "string" && value.trim() ? value : undefined
 }
 
+function getBuiltinProviderModelRecords(
+  provider: string,
+): Array<Record<string, unknown>> {
+  return builtinProviderModelRegistry.getModelIds(provider).map((id) => ({
+    id,
+    name: id,
+    object: "model",
+  }))
+}
+
+type ProviderModelsFallbackReason = "error" | "invalid_body" | "non_ok"
+
+function getFallbackProviderModelRecords(
+  provider: string,
+  reason: ProviderModelsFallbackReason,
+  details: Record<string, unknown> = {},
+): Array<Record<string, unknown>> {
+  const fallbackModels = getBuiltinProviderModelRecords(provider)
+  logger.warn(`models.provider.fallback_${reason}`, {
+    provider,
+    ...details,
+    fallbackModelCount: fallbackModels.length,
+  })
+  return fallbackModels
+}
+
 function normalizeProviderModel(
   provider: string,
   model: unknown,
@@ -99,6 +126,43 @@ function normalizeProviderModel(
   }
 }
 
+function normalizeProviderModels(
+  provider: string,
+  models: Array<unknown>,
+): Array<ClientModel> {
+  return models
+    .map((model) => normalizeProviderModel(provider, model))
+    .filter((model): model is ClientModel => model !== null)
+}
+
+async function getProviderModelRecords(
+  providerConfig: ResolvedProviderConfig,
+  requestHeaders: Headers,
+): Promise<Array<Record<string, unknown>>> {
+  try {
+    const response = await forwardProviderModels(providerConfig, requestHeaders)
+    if (!response.ok) {
+      return getFallbackProviderModelRecords(providerConfig.name, "non_ok", {
+        statusCode: response.status,
+      })
+    }
+
+    const body = await response.json()
+    if (!isRecord(body) || !Array.isArray(body.data)) {
+      return getFallbackProviderModelRecords(
+        providerConfig.name,
+        "invalid_body",
+      )
+    }
+
+    return body.data.filter(isRecord)
+  } catch (error) {
+    return getFallbackProviderModelRecords(providerConfig.name, "error", {
+      error,
+    })
+  }
+}
+
 async function getProviderModels(
   provider: string,
   requestHeaders: Headers,
@@ -110,36 +174,24 @@ async function getProviderModels(
     }
 
     if (providerConfig.name === "codex") {
-      const codexModels = getCodexModels().data
-      return codexModels
-        .map((model) => normalizeProviderModel(providerConfig.name, model))
-        .filter((model): model is ClientModel => model !== null)
+      return normalizeProviderModels(providerConfig.name, getCodexModels().data)
     }
 
-    const response = await forwardProviderModels(providerConfig, requestHeaders)
-    if (!response.ok) {
-      logger.warn("models.provider.skip_non_ok", {
+    const models = await getProviderModelRecords(providerConfig, requestHeaders)
+    return normalizeProviderModels(providerConfig.name, models)
+  } catch (error) {
+    if (provider === "codex") {
+      logger.warn("models.provider.skip_error", {
         provider,
-        statusCode: response.status,
+        error,
       })
       return []
     }
 
-    const body = await response.json()
-    if (!isRecord(body) || !Array.isArray(body.data)) {
-      logger.warn("models.provider.skip_invalid_body", { provider })
-      return []
-    }
-
-    return body.data
-      .map((model) => normalizeProviderModel(providerConfig.name, model))
-      .filter((model): model is ClientModel => model !== null)
-  } catch (error) {
-    logger.warn("models.provider.skip_error", {
-      provider,
+    const fallbackModels = getFallbackProviderModelRecords(provider, "error", {
       error,
     })
-    return []
+    return normalizeProviderModels(provider, fallbackModels)
   }
 }
 
@@ -256,9 +308,6 @@ function createCopilotCodexCandidate(
       model.capabilities.supports.vision ? ["text", "image"] : ["text"],
     reasoningEfforts,
     defaultReasoningEffort: selectDefaultReasoningEffort(reasoningEfforts),
-    supportsParallelToolCalls: Boolean(
-      model.capabilities.supports.parallel_tool_calls,
-    ),
   }
 }
 
@@ -298,7 +347,6 @@ async function getProviderCodexCandidates(
         continue
       }
       const modelConfig = providerConfig.models?.[modelId]
-      if (modelConfig?.codex?.enabled === false) continue
       candidates.push(
         createProviderCodexCandidate(
           providerConfig,
@@ -320,31 +368,6 @@ function isMessagesFallbackProviderType(type: ProviderType): boolean {
   return type === "anthropic" || type === "openai-compatible"
 }
 
-async function getProviderModelRecords(
-  providerConfig: ResolvedProviderConfig,
-  requestHeaders: Headers,
-): Promise<Array<Record<string, unknown>>> {
-  try {
-    const response = await forwardProviderModels(providerConfig, requestHeaders)
-    if (!response.ok) {
-      logger.warn("models.codex.provider_skip_non_ok", {
-        provider: providerConfig.name,
-        statusCode: response.status,
-      })
-      return []
-    }
-    const body = await response.json()
-    if (!isRecord(body) || !Array.isArray(body.data)) return []
-    return body.data.filter(isRecord)
-  } catch (error) {
-    logger.warn("models.codex.provider_models_error", {
-      provider: providerConfig.name,
-      error,
-    })
-    return []
-  }
-}
-
 function createProviderCodexCandidate(
   providerConfig: ResolvedProviderConfig,
   modelId: string,
@@ -352,19 +375,25 @@ function createProviderCodexCandidate(
   modelConfig: ModelConfig | undefined,
   effectiveType: ProviderType,
 ): SyntheticCodexModelCandidate {
-  const codexConfig = modelConfig?.codex
+  const builtinModelConfig = builtinProviderModelRegistry.getModelConfig(
+    providerConfig.name,
+    modelId,
+  )
   const configuredReasoningEfforts = normalizeReasoningEfforts(
-    codexConfig?.reasoningEfforts,
+    modelConfig?.reasoningEfforts,
   )
   const reasoningEfforts =
     configuredReasoningEfforts.length > 0 ?
       configuredReasoningEfforts
     : normalizeRemoteReasoningEfforts(remoteModel)
   const configuredModalities = normalizeInputModalities(
-    codexConfig?.inputModalities,
+    modelConfig?.inputModalities,
   )
   const remoteModalities = normalizeInputModalities(
     remoteModel?.input_modalities ?? remoteModel?.modalities,
+  )
+  const builtinModalities = normalizeInputModalities(
+    builtinModelConfig?.inputModalities,
   )
   const displayName =
     getStringField(remoteModel ?? {}, "display_name")
@@ -381,34 +410,33 @@ function createProviderCodexCandidate(
     displayName: `${displayName} (${providerConfig.name})`,
     description: `${displayName} through the ${providerConfig.name} ${adapterName} adapter.`,
     contextWindow: positiveNumber(
-      codexConfig?.contextWindow
+      modelConfig?.contextWindow
         ?? getFirstPositiveNumber(remoteModel, [
           "context_window",
           "context_length",
           "max_context_length",
           "max_model_len",
-        ]),
+        ])
+        ?? builtinModelConfig?.contextWindow,
       256_000,
     ),
     maxOutputTokens: positiveNumber(
-      codexConfig?.maxOutputTokens
-        ?? getFirstPositiveNumber(remoteModel, ["max_output_tokens"]),
+      modelConfig?.maxOutputTokens
+        ?? getFirstPositiveNumber(remoteModel, ["max_output_tokens"])
+        ?? builtinModelConfig?.maxOutputTokens,
       32_000,
     ),
     inputModalities: resolveInputModalities(
       providerConfig.name,
       configuredModalities,
       remoteModalities,
+      builtinModalities,
     ),
     reasoningEfforts,
     defaultReasoningEffort: selectDefaultReasoningEffort(
       reasoningEfforts,
-      codexConfig?.defaultReasoningEffort,
+      modelConfig?.defaultReasoningEffort,
     ),
-    supportsParallelToolCalls:
-      codexConfig?.supportsParallelToolCalls
-      ?? getBooleanField(remoteModel, "supports_parallel_tool_calls")
-      ?? false,
   }
 }
 
@@ -458,14 +486,18 @@ function resolveInputModalities(
   providerName: string,
   configuredModalities: Array<"text" | "image">,
   remoteModalities: Array<"text" | "image">,
+  builtinModalities: Array<"text" | "image">,
 ): Array<"text" | "image"> {
   if (configuredModalities.length > 0) return configuredModalities
   if (providerName === "kimi") {
     const modalities: Array<"text" | "image"> =
-      remoteModalities.length > 0 ? remoteModalities : ["text"]
+      remoteModalities.length > 0 ? remoteModalities
+      : builtinModalities.length > 0 ? builtinModalities
+      : ["text"]
     return [...new Set<"text" | "image">([...modalities, "image"])]
   }
-  return remoteModalities.length > 0 ? remoteModalities : ["text"]
+  if (remoteModalities.length > 0) return remoteModalities
+  return builtinModalities.length > 0 ? builtinModalities : ["text"]
 }
 
 function selectDefaultReasoningEffort(
@@ -495,14 +527,6 @@ function getFirstPositiveNumber(
     }
   }
   return undefined
-}
-
-function getBooleanField(
-  model: Record<string, unknown> | undefined,
-  field: string,
-): boolean | undefined {
-  const value = model?.[field]
-  return typeof value === "boolean" ? value : undefined
 }
 
 modelRoutes.get("/", async (c) => {
