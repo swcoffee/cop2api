@@ -9,6 +9,7 @@ import {
 import { createHandlerLogger, debugJson, debugJsonTail } from "~/lib/logger"
 import { findEndpointModel } from "~/lib/models"
 import { parseProviderModelAlias } from "~/lib/provider-model"
+import { isCodexUserAgent } from "~/routes/models/codex-models"
 import { handleProviderResponsesForProvider } from "~/routes/provider/responses/handler"
 import {
   createCopilotTokenUsageRecorder,
@@ -25,6 +26,7 @@ import type { SubagentMarker } from "~/lib/subagent"
 import type {
   ResponsesPayload,
   ResponsesResult,
+  ResponsesTransport,
   ResponseStreamEvent,
 } from "~/lib/types/responses"
 import { createResponses as createCopilotResponses } from "~/services/copilot/create-responses"
@@ -92,19 +94,24 @@ export const handleResponses = async (c: Context) => {
   payload.model = selectedModel?.id ?? payload.model
   const responsesTransport = getResponsesTransportForModel(selectedModel)
 
-  if (!responsesTransport) {
-    const supportedEndpoints = selectedModel?.supported_endpoints ?? []
-    if (
-      supportedEndpoints.includes("/v1/messages")
-      || supportedEndpoints.includes("/chat/completions")
-    ) {
-      return await handleResponsesViaMessages(c, {
-        payload,
-        publicModel: requestedModel,
-        targetModel: payload.model,
-      })
-    }
+  const useMessagesFallback = shouldFallbackToMessages(
+    c,
+    payload.model,
+    selectedModel,
+    responsesTransport,
+  )
+  if (useMessagesFallback) {
+    return await handleResponsesViaMessages(c, {
+      payload,
+      publicModel: requestedModel,
+      targetModel: payload.model,
+      subagentMarker,
+      requestId,
+      sessionId: fallbackSessionId,
+    })
+  }
 
+  if (!responsesTransport) {
     return c.json(
       {
         error: {
@@ -124,6 +131,7 @@ export const handleResponses = async (c: Context) => {
   })
 
   removeUnsupportedTools(payload)
+  fillEmptyNamespaceToolDescriptions(payload)
 
   if (!responsesHandlerDependencies.isResponsesApiWebSearchEnabled()) {
     removeWebSearchTool(payload)
@@ -224,6 +232,27 @@ export const handleResponses = async (c: Context) => {
 const isStreamingRequested = (payload: ResponsesPayload): boolean =>
   Boolean(payload.stream)
 
+const shouldFallbackToMessages = (
+  c: Context,
+  modelId: string,
+  selectedModel: { supported_endpoints?: Array<string> } | undefined,
+  responsesTransport: ResponsesTransport | null,
+): boolean => {
+  if (isCodexUserAgent(c.req.header("user-agent"))) {
+    return !modelId.startsWith("gpt")
+  }
+
+  if (responsesTransport) {
+    return false
+  }
+
+  const supportedEndpoints = selectedModel?.supported_endpoints ?? []
+  return (
+    supportedEndpoints.includes("/v1/messages")
+    || supportedEndpoints.includes("/chat/completions")
+  )
+}
+
 const parseResponsesStreamEvent = (
   chunk: unknown,
 ): ResponseStreamEvent | null => {
@@ -269,6 +298,36 @@ export const removeUnsupportedTools = (payload: ResponsesPayload): void => {
   })
   if (dropped.length > 0) {
     logger.debug("Removed unsupported tools:", dropped)
+  }
+}
+
+export const fillEmptyNamespaceToolDescriptions = (
+  payload: ResponsesPayload,
+): void => {
+  fillEmptyNamespaceDescriptions(payload.tools)
+
+  if (!Array.isArray(payload.input)) return
+
+  for (const item of payload.input) {
+    if (!item || typeof item !== "object") continue
+    fillEmptyNamespaceDescriptions((item as Record<string, unknown>).tools)
+  }
+}
+
+const fillEmptyNamespaceDescriptions = (tools: unknown): void => {
+  if (!Array.isArray(tools)) return
+
+  for (const tool of tools) {
+    if (!tool || typeof tool !== "object") continue
+
+    const namespaceTool = tool as Record<string, unknown>
+    if (
+      namespaceTool.type === "namespace"
+      && namespaceTool.description === ""
+      && typeof namespaceTool.name === "string"
+    ) {
+      namespaceTool.description = namespaceTool.name
+    }
   }
 }
 
