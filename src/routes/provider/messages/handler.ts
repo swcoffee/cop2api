@@ -88,6 +88,8 @@ import {
   forwardProviderMessages,
   forwardProviderResponses,
 } from "~/services/providers/provider-proxy"
+import { createResponsesHttpEventStream } from "~/services/responses-http"
+import { createResponsesSafeStream } from "~/services/responses-websocket-helpers"
 import {
   applyMissingExtraBody,
   applyModelDefaults,
@@ -95,6 +97,10 @@ import {
 import consola from "consola"
 
 const logger = createHandlerLogger("provider-messages-handler")
+
+export const providerMessagesHandlerDependencies = {
+  resolveProviderConfig,
+}
 
 export async function handleProviderMessages(
   c: Context<Env, "/:provider">,
@@ -125,7 +131,8 @@ export async function handleProviderMessagesForProvider(
   },
 ): Promise<Response> {
   const { payload, provider, usageEndpoint } = options
-  const providerConfig = await resolveProviderConfig(provider)
+  const providerConfig =
+    await providerMessagesHandlerDependencies.resolveProviderConfig(provider)
   if (!providerConfig) {
     return c.json(
       {
@@ -273,6 +280,7 @@ const handleOpenAIResponsesProviderWebSearchMessages = async (
       responsesPayload,
       c.req.raw.headers,
       providerConfig.baseUrl,
+      { signal: c.req.raw.signal },
     )
 
     if (isResponsesStream(upstreamResponse)) {
@@ -307,6 +315,7 @@ const handleOpenAIResponsesProviderWebSearchMessages = async (
     providerConfig,
     responsesPayload,
     c.req.raw.headers,
+    { signal: c.req.raw.signal },
   )
 
   if (!upstreamResponse.ok) {
@@ -326,7 +335,10 @@ const handleOpenAIResponsesProviderWebSearchMessages = async (
       errorMessagePrefix: `${provider} web search responses stream`,
       parseEvent: (data) =>
         parseResponsesProviderStreamChunk(data, providerConfig),
-      upstreamResponse: events(upstreamResponse),
+      upstreamResponse: createResponsesHttpEventStream(
+        upstreamResponse,
+        c.req.raw.signal,
+      ),
       logger,
     })
     return respondWebSearchProviderMessagesJson(c, {
@@ -394,6 +406,7 @@ const handleOpenAIResponsesProviderMessages = async (
       responsesPayload,
       c.req.raw.headers,
       providerConfig.baseUrl,
+      { signal: c.req.raw.signal },
     )
 
     if (isResponsesStream(upstreamResponse)) {
@@ -443,6 +456,7 @@ const handleOpenAIResponsesProviderMessages = async (
     providerConfig,
     responsesPayload,
     c.req.raw.headers,
+    { signal: c.req.raw.signal },
   )
 
   if (!upstreamResponse.ok) {
@@ -458,7 +472,10 @@ const handleOpenAIResponsesProviderMessages = async (
       pricingCurrency: providerConfig.pricingCurrency,
       provider,
       providerConfig,
-      upstreamResponse: events(upstreamResponse),
+      upstreamResponse: createResponsesSafeStream(
+        createResponsesHttpEventStream(upstreamResponse, c.req.raw.signal),
+        { signal: c.req.raw.signal },
+      ),
       usageEndpoint,
     })
   }

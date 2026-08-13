@@ -426,7 +426,7 @@ requires_openai_auth = true
 supports_websockets = false
 wire_api = "responses"
 request_max_retries = 3
-stream_max_retries = 1
+stream_max_retries = 3
 stream_idle_timeout_ms = 300000
 
 [features]
@@ -444,6 +444,8 @@ enabled = false
 > 对于不支持 `tool_search` 的第三方模型，我们建议禁用 features.apps。否则，每个提示可能会额外消耗 20,000 多个 token。
 
 Codex 客户端（`User-Agent` 以 `codex` 开头）请求顶层 `GET /v1/models` 时，网关会把原生 Codex 模型与可通过 Messages 适配的模型合并返回。后者会声明 `use_responses_lite: true`：调用 `/v1/responses` 后，Anthropic provider 走 **Responses → Messages**，OpenAI 兼容 provider 以及只支持 Chat 的 Copilot 模型则复用现有 Messages 路由继续走 **Responses → Messages → Chat Completions**，最终统一翻译回 Responses（包括流式事件）。
+
+对 Codex 客户端而言，只有 `gpt-*` Copilot 模型走原生 Responses API；非 GPT Copilot 模型一律走适配路径，即使声明支持原生 `/responses` 也不例外。
 
 Responses Lite 的工具定义从 `input` 中的 `additional_tools` 读取，而不是依赖顶层 `tools`。该适配支持 function、`namespace` 和 custom tool；`apply_patch` 需要由客户端声明为 `type: "custom"`，不会作为独立工具类型特殊处理。工具调用返回时会恢复原始 `name` 与 `namespace`；压缩请求在裁剪旧历史前先保存工具定义，因此压缩期间也不会丢失工具。Messages 回退路径不支持 Responses `tool_search` 模式。Anthropic 的 `output_config.effort` 仍只使用项目既有的合法档位；Responses 的 `minimal` 会降级为 `low`，`none` 则不向 Anthropic 发送 effort。
 
@@ -689,6 +691,14 @@ Copilot API 现在使用子命令结构，主要命令包括：
     },
     "useMessagesApi": true,
     "useResponsesApiWebSocket": true,
+    "responsesTransport": {
+      "headersTimeoutMs": 30000,
+      "streamInactivityTimeoutMs": 300000,
+      "websocketOpenTimeoutMs": 30000,
+      "websocketPoolIdleTimeoutMs": 60000,
+      "websocketMaxBufferedBytes": 8388608,
+      "websocketMaxBufferedMessages": 1024
+    },
     "useResponsesApiWebSearch": true,
     "alphaSearchCodexPriority": true,
     "alphaSearchModel": "gpt-5-mini",
@@ -729,6 +739,7 @@ Copilot API 现在使用子命令结构，主要命令包括：
   - **配置可选值：** `none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`。
 - **useMessagesApi：** 当为 `true` 时，支持 Copilot 原生 `/v1/messages` 的 Claude 系模型会走 Messages API；否则回退到 `/chat/completions`。设为 `false` 可禁用 Messages API 路由，始终使用 `/chat/completions`。默认值为 `true`。
 - **useResponsesApiWebSocket：** 当为 `true` 时，Responses API 请求会优先对声明了 `ws:/responses` 的模型使用 Copilot websocket transport；仅声明 `/responses` 的模型仍走 HTTP。设为 `false` 可禁用 websocket 路由，并在模型支持 `/responses` 时使用 HTTP `/responses`。默认值为 `true`。如果遇到 Responses API WebSocket closed，一般是自己的网络问题。如果使用了 VPN，建议切换节点。
+- **responsesTransport：** 所有上游 Responses transport 共用的生命周期与缓冲区正整数限制。无效值、零或负数会回退到上面列出的默认值。`headersTimeoutMs` 从连接建立开始计算，到收到 HTTP 响应头为止，并不是整个生成过程的总时限。每收到一个 HTTP body chunk 或 WebSocket message 都会重置 `streamInactivityTimeoutMs`，因此持续活跃的长推理任务不会被短总时限中断。`websocketOpenTimeoutMs` 限制 WebSocket 握手时间；`websocketPoolIdleTimeoutMs` 只控制已正常完成且可复用的空闲连接。WebSocket 队列同时受字节数和消息数上限约束；超过任一上限时会终止该 stream 并使 socket 失效，而不会丢弃或重排事件。
 - **useResponsesApiWebSearch：** 当为 `true` 时，服务端会保留 Responses API 中 `type: "web_search"` 的工具并透传到上游。设为 `false` 则会从 `/responses` payload 中移除这些工具。默认值为 `true`。
 - **alphaSearchCodexPriority：** 默认值为 `true`。顶层 alpha-search 请求优先使用 Codex alpha-search 端点，因为它不会消耗 provider 配额。若 Codex 不可用，或该配置设为 `false`，使用非 `codex/model` 的 `provider/model` 别名的请求会调用目标 provider 的 `/v1/responses` 端点，没有 provider 前缀的请求使用 GitHub Copilot Responses web search。该适配器会识别当前所有 Codex search command；不受支持的 `image_query` 和 `screenshot` 会返回成功且明确要求不要重试的 tool output。
 - **alphaSearchModel：** Messages-backed 的 Responses Lite 模型不能直接执行 Responses web search 时使用的原生 Responses 搜索模型，默认值为 `gpt-5-mini`。可以配置普通 Copilot 模型或 `openai-responses` 类型的 `provider/model`；设为空字符串可禁用，此时这类模型的 alpha-search 请求会返回参数错误。

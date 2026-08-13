@@ -398,7 +398,7 @@ requires_openai_auth = true
 supports_websockets = false
 wire_api = "responses"
 request_max_retries = 3
-stream_max_retries = 1
+stream_max_retries = 3
 stream_idle_timeout_ms = 300000
 
 [features]
@@ -416,6 +416,8 @@ enabled = false
 > For third-party models that do not support `tool_search`, we recommend disabling features.apps. Otherwise, each prompt may consume an additional 20,000 or more tokens.
 
 When a Codex client (`User-Agent` starts with `codex`) requests the top-level `GET /v1/models`, the gateway merges native Codex models with models available through the Messages adapter. The latter advertise `use_responses_lite: true`: `/v1/responses` uses **Responses → Messages** for Anthropic providers, while OpenAI-compatible providers and Chat-only Copilot models reuse the existing Messages route for **Responses → Messages → Chat Completions**, then translate streaming or JSON results back to Responses.
+
+For Codex clients, only `gpt-*` Copilot models use the native Responses API; non-GPT Copilot models always go through the adapter, even when they advertise native `/responses` support.
 
 Responses Lite tool definitions are read from `input.additional_tools`, without relying on top-level `tools`. Function, `namespace`, and custom tools are supported; clients must declare `apply_patch` as `type: "custom"`, and it is not handled as a standalone special tool type. Returned calls recover their original `name` and `namespace`. Tools are collected before old history is trimmed, so compaction requests retain them. The Messages fallback does not support Responses `tool_search` mode. Anthropic `output_config.effort` keeps the project's existing valid levels; Responses `minimal` maps to `low`, while `none` omits Anthropic effort.
 
@@ -649,6 +651,14 @@ Use `copilot-api auth login --provider custom` to add or update another third-pa
     },
     "useMessagesApi": true,
     "useResponsesApiWebSocket": true,
+    "responsesTransport": {
+      "headersTimeoutMs": 30000,
+      "streamInactivityTimeoutMs": 300000,
+      "websocketOpenTimeoutMs": 30000,
+      "websocketPoolIdleTimeoutMs": 60000,
+      "websocketMaxBufferedBytes": 8388608,
+      "websocketMaxBufferedMessages": 1024
+    },
     "useResponsesApiWebSearch": true,
     "alphaSearchCodexPriority": true,
     "alphaSearchModel": "gpt-5-mini",
@@ -689,6 +699,7 @@ Use `copilot-api auth login --provider custom` to add or update another third-pa
   - **Configuration values:** `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
 - **useMessagesApi:** When `true`, Claude-family models that support Copilot's native `/v1/messages` endpoint will use the Messages API; otherwise they fall back to `/chat/completions`. Set to `false` to disable Messages API routing and always use `/chat/completions`. Defaults to `true`.
 - **useResponsesApiWebSocket:** When `true`, Responses API requests use Copilot's websocket transport for models that advertise `ws:/responses`; models that only advertise `/responses` continue to use HTTP. Set to `false` to disable websocket routing and use HTTP `/responses` whenever the selected model supports it. Defaults to `true`. If the Responses API WebSocket gets closed, it is usually caused by your own network. If you are using a VPN, try switching to a different node.
+- **responsesTransport:** Positive integer lifecycle and buffering limits for every upstream Responses transport. Invalid, zero, or negative values fall back to the defaults shown above. `headersTimeoutMs` covers connection setup through receipt of HTTP response headers; it is not a total generation deadline. `streamInactivityTimeoutMs` is reset by every HTTP body chunk or WebSocket message, allowing long generations to continue while they remain active. `websocketOpenTimeoutMs` limits the WebSocket handshake, while `websocketPoolIdleTimeoutMs` controls only completed, reusable pooled sockets. The byte and message limits bound queued WebSocket events; exceeding either limit fails that stream and invalidates its socket rather than dropping or reordering events.
 - **useResponsesApiWebSearch:** When `true`, the server keeps Responses API tools with `type: "web_search"` and forwards them upstream. Set to `false` to strip those tools from `/responses` payloads. Defaults to `true`.
 - **alphaSearchCodexPriority:** Defaults to `true`. Top-level alpha-search requests prefer the Codex alpha-search endpoint because it does not consume provider quota. If Codex is unavailable, or this setting is `false`, requests with a `provider/model` alias other than `codex/model` use that provider's `/v1/responses` endpoint, and requests without a provider prefix use GitHub Copilot Responses web search. The adapter recognizes every current Codex search command; unsupported `image_query` and `screenshot` operations return successful no-retry tool output.
 - **alphaSearchModel:** Native Responses search model used when a Messages-backed Responses Lite model cannot run Responses web search directly. Defaults to `gpt-5-mini`; it may be a regular Copilot model or an `openai-responses` `provider/model` alias. Set it to an empty string to disable this redirect, in which case alpha-search requests for those models return an invalid-request error.
