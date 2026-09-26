@@ -230,7 +230,7 @@ export function prepareCodexResponsesWebSocketRequest(
   baseUrl: string = CODEX_API_BASE_URL,
 ): CodexResponsesWebSocketRequest {
   const headers = buildCodexResponsesWebSocketHeaders(requestHeaders)
-
+  // websocket need not x-codex-turn-state, https need this.
   return {
     headers,
     payload: buildCodexResponsesWebSocketPayload(payload),
@@ -439,7 +439,7 @@ const buildCodexResponsesWebSocketPoolKey = (
     .update(
       JSON.stringify(
         Object.entries(headers)
-          .filter(([headerName]) => !headerName.toLowerCase().includes("trace"))
+          .filter(([headerName]) => shouldIncludeHeader(headerName))
           .sort(([left], [right]) => left.localeCompare(right)),
       ),
     )
@@ -612,4 +612,9 @@ const createCodexResponsesWebSocketStreamChunk = (
   } catch {
     return { data }
   }
+}
+
+function shouldIncludeHeader(headerName: string): boolean {
+  const header = headerName.toLowerCase()
+  return !header.includes("trace") && !header.startsWith("x-codex-turn-state")
 }
