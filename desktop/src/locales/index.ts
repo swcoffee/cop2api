@@ -6,7 +6,6 @@ export interface Locale {
     title: string
     close: string
     description: string
-    enabledScope: string
     configured: string
     catalogBudget: string
     unsaved: string
@@ -34,9 +33,8 @@ export interface Locale {
     manualModels: string
     modelSourceHint: string
     modelsError: string
-    restartHint: string
     saved: string
-    savedRestart: string
+    savedRefreshed: string
     save: string
     saving: string
   }
@@ -53,8 +51,8 @@ export interface Locale {
     codexAddAccount: string
     codexNoAccounts: string
     codexRemoveAccount: string
-    codexRemoveRestartRequired: string
-    codexRestartRequired: string
+    codexAccountRemovedRefreshed: string
+    codexAccountRefreshed: string
     codexUseAccount: string
     customProvider: string
     modelsDevProvider: string
@@ -194,6 +192,7 @@ export interface Locale {
     startTimeout: string
     processExit: string
     invalidHost: string
+    restartFailed: string
   }
   settings: {
     title: string
@@ -208,6 +207,8 @@ export interface Locale {
     minimizeToTrayDesc: string
     sectionSecurity: string
     serverKeysNote: string
+    serverKeysSaveFailed: string
+    desktopSettingsSaveFailed: string
     apiKeysLabel: string
     apiKeysDesc: string
     adminKeyLabel: string
