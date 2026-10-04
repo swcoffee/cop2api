@@ -1,6 +1,29 @@
 import type { Locale } from './index'
 
 const en: Locale = {
+  updates: {
+    title: 'Updates',
+    description:
+      'Check for updates on launch and every 6 hours. Windows and Linux AppImage updates download automatically. Unsigned macOS builds use manual DMG installation.',
+    currentVersion: 'Current version: {{version}}',
+    idle: 'Ready to check for updates',
+    checking: 'Checking for updates…',
+    'not-available': 'No newer release is available for this platform',
+    available: 'Version {{version}} is available',
+    downloading: 'Downloading {{version}} — {{percent}}%',
+    downloaded: 'Version {{version}} is ready to install',
+    installing: 'Stopping the server and installing…',
+    error: 'Update failed. Check your connection and try again.',
+    disabled: 'Updates are available in packaged builds only',
+    check: 'Check for updates',
+    restartInstall: 'Restart and install',
+    openRelease: 'Download installer',
+    manualInstall: 'Download and install the package from GitHub Releases.',
+    restartNote:
+      'Restarting stops the local API server and interrupts active requests.',
+    progress: 'Update download progress',
+    actionFailed: 'Could not complete the update action. Please try again.',
+  },
   providers: {
     title: 'Providers',
     close: 'Close',
@@ -118,6 +141,8 @@ const en: Locale = {
     authHeader: 'Auth header',
     copy: 'Copy',
     quotaUsage: 'Quota usage',
+    quotaUsedPercent: '{{percent}}% used',
+    quotaRemainingPercent: '{{percent}}% remaining',
     refreshing: 'Refreshing…',
     refresh: 'Refresh',
     tokenUsage: 'Token usage',
@@ -125,6 +150,7 @@ const en: Locale = {
     tokenUsageCache: 'Cache',
     tokenUsageCacheRead: 'Cache read',
     tokenUsageCacheWrite: 'Cache write',
+    tokenUsageCacheHitRate: 'Cache hit rate',
     tokenUsageCost: 'Cost',
     tokenUsageEndpoint: 'Endpoint',
     tokenUsageEvents: 'Event details',
@@ -180,6 +206,7 @@ const en: Locale = {
   menu: {
     file: 'File',
     fileSettings: 'Settings',
+    fileAuthConfig: 'Auth config',
     fileQuit: 'Quit',
     view: 'View',
     viewReload: 'Reload',
