@@ -5,6 +5,7 @@ import fs from "node:fs"
 import type { TokenUsagePricingConfig } from "~/lib/token-usage/pricing"
 
 import { writeFileAtomically } from "./atomic-file"
+import { isGitHubCopilotAvailable } from "./github-copilot-provider"
 import { PATHS } from "./paths"
 
 export interface AppConfig {
@@ -17,6 +18,7 @@ export interface AppConfig {
   extraPrompts?: Record<string, string>
   smallModels?: SmallModelsConfig
   contextManagement?: ContextManagementConfig
+  opencodeModelContextWindow?: number
   modelResponsesApiCompactThresholds?: Record<string, number>
   modelReasoningEfforts?: Record<
     string,
@@ -42,7 +44,10 @@ export interface AppConfig {
   // "You are a security monitor for autonomous AI coding agents.".
   // A `provider/model` alias is forwarded to that provider's message API on
   // the top-level route. Provider message routes use the configured value on
-  // their current provider. Leave empty to disable (default).
+  // their current provider. Defaults to codex-auto-review when Codex is
+  // enabled, otherwise gpt-6-luna when GitHub Copilot is enabled and both its
+  // GitHub and Copilot tokens are loaded. An explicit empty value disables
+  // the override.
   claudeAutoModel?: string
   claudeTokenMultiplier?: number
 }
@@ -144,6 +149,8 @@ export const defaultContextManagement = {
   responses: false,
 } satisfies Required<ContextManagementConfig>
 
+export const defaultOpencodeModelContextWindow = 300_000
+
 export const defaultConfig: AppConfig = {
   auth: {
     apiKeys: [],
@@ -158,6 +165,7 @@ export const defaultConfig: AppConfig = {
     copilot: "gpt-6-luna",
   },
   contextManagement: defaultContextManagement,
+  opencodeModelContextWindow: defaultOpencodeModelContextWindow,
   modelResponsesApiCompactThresholds,
   useMessagesApi: true,
   useResponsesApiWebSocket: true,
@@ -301,6 +309,10 @@ function mergeDefaultConfig(inputConfig: AppConfig): {
   const contextManagement = normalizeContextManagementConfig(
     config.contextManagement,
   )
+  const opencodeModelContextWindow = positiveIntegerOrDefault(
+    config.opencodeModelContextWindow,
+    defaultOpencodeModelContextWindow,
+  )
   const {
     changed: upstreamTransportMigrated,
     migrated: migratedUpstreamTransport,
@@ -334,6 +346,8 @@ function mergeDefaultConfig(inputConfig: AppConfig): {
   const hasResponsesApiCompactThresholdChanges =
     missingResponsesApiCompactThresholdModels.length > 0
   const hasContextManagementChanges = missingContextManagementKeys.length > 0
+  const hasOpencodeModelContextWindowChanges =
+    config.opencodeModelContextWindow !== opencodeModelContextWindow
   const hasUpstreamTransportChanges = Object.entries(upstreamTransport).some(
     ([key, value]) =>
       migratedUpstreamTransport[key as keyof UpstreamTransportConfig] !== value,
@@ -345,6 +359,7 @@ function mergeDefaultConfig(inputConfig: AppConfig): {
     && !hasReasoningEffortChanges
     && !hasResponsesApiCompactThresholdChanges
     && !hasContextManagementChanges
+    && !hasOpencodeModelContextWindowChanges
     && !hasUpstreamTransportChanges
     && !upstreamTransportMigrated
     && !agentModelsMigrated
@@ -367,6 +382,7 @@ function mergeDefaultConfig(inputConfig: AppConfig): {
         ...defaultContextManagementConfig,
         ...contextManagement,
       },
+      opencodeModelContextWindow,
       extraPrompts: {
         ...defaultExtraPrompts,
         ...extraPrompts,
@@ -548,6 +564,13 @@ export function isResponsesApiWebSocketEnabled(): boolean {
   return config.useResponsesApiWebSocket ?? true
 }
 
+export function getOpencodeModelContextWindow(): number {
+  return positiveIntegerOrDefault(
+    getConfig().opencodeModelContextWindow,
+    defaultOpencodeModelContextWindow,
+  )
+}
+
 // Applies to every upstream HTTP transport (Copilot Chat Completions and
 // Messages, Codex Responses, and provider-forwarded requests), not only the
 // Responses API.
@@ -617,10 +640,25 @@ export function getMessageApiWebSearchModel(): string | undefined {
   return model && model.trim().length > 0 ? model : undefined
 }
 
-export function getClaudeAutoModel(): string | undefined {
+export function getClaudeAutoModel(
+  useDefault: boolean = false,
+): string | undefined {
   const config = getConfig()
   const model = config.claudeAutoModel
-  return model && model.trim().length > 0 ? model.trim() : undefined
+  if (model !== undefined) {
+    return model && model.trim().length > 0 ? model.trim() : undefined
+  }
+
+  if (!useDefault) {
+    return undefined
+  }
+
+  const codexProvider = config.providers?.codex
+  if (codexProvider && codexProvider.enabled !== false) {
+    return "codex-auto-review"
+  }
+
+  return isGitHubCopilotAvailable(config) ? "gpt-6-luna" : undefined
 }
 
 export function getClaudeTokenMultiplier(): number {
