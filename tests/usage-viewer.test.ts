@@ -114,6 +114,11 @@ describe("usage viewer model cache hit rate", () => {
       ),
       extractInlineFunctionRange(
         html,
+        "        function formatCellText(value) {",
+        "        function formatRangeDate(value) {",
+      ),
+      extractInlineFunctionRange(
+        html,
         "        function renderTokenUsageValueLines(value) {",
         "        function renderTokenUsageEventsTable(eventsPage) {",
       ),
@@ -132,9 +137,18 @@ describe("usage viewer model cache hit rate", () => {
     const state: {
       isTokenUsageLoading: boolean
       tokenUsageSummary?: TokenUsageSummary
-    } = { isTokenUsageLoading: false }
+      isSessionsLoading: boolean
+      tokenUsageSessionsError: string | null
+      tokenUsageSessionsPage: unknown
+    } = {
+      isTokenUsageLoading: false,
+      isSessionsLoading: false,
+      tokenUsageSessionsError: null,
+      tokenUsageSessionsPage: null,
+    }
     const viewer = runInNewContext(source, {
       state,
+      renderError: (message: string) => `<p>${message}</p>`,
       renderTokenUsageRangeText: () => "Today",
       renderTokenUsageDailyTrend: () => "",
       renderPaginationButton: () => "",
@@ -297,6 +311,11 @@ describe("usage viewer cost metrics", () => {
       ),
       extractInlineFunctionRange(
         html,
+        "        function formatCellText(value) {",
+        "        function formatRangeDate(value) {",
+      ),
+      extractInlineFunctionRange(
+        html,
         "        function renderTokenUsageValueLines(value) {",
         "        function renderTokenUsageEventsTable(eventsPage) {",
       ),
@@ -315,9 +334,18 @@ describe("usage viewer cost metrics", () => {
     const state: {
       isTokenUsageLoading: boolean
       tokenUsageSummary?: TokenUsageSummary
-    } = { isTokenUsageLoading: false }
+      isSessionsLoading: boolean
+      tokenUsageSessionsError: string | null
+      tokenUsageSessionsPage: unknown
+    } = {
+      isTokenUsageLoading: false,
+      isSessionsLoading: false,
+      tokenUsageSessionsError: null,
+      tokenUsageSessionsPage: null,
+    }
     const viewer = runInNewContext(source, {
       state,
+      renderError: (message: string) => `<p>${message}</p>`,
       renderTokenUsageRangeText: () => "Today",
       renderTokenUsageDailyTrend: () => "",
       renderPaginationButton: () => "",
@@ -365,10 +393,262 @@ describe("usage viewer cost metrics", () => {
           node.querySelector(".metric-label")?.textContent?.trim() === "Cost",
       )
       expect(costCard?.querySelector(".metric-value")?.textContent).toBe("—")
+
+      state.tokenUsageSummary = summaryFor([])
+      const sessionsPage = (page: number, count: number) => ({
+        items: Array.from({ length: count }, (_, index) => ({
+          ...summaryFor([]).totals,
+          session_id: `session-${(page - 1) * 10 + index + 1}`,
+        })),
+        page,
+        total: 25,
+        total_pages: 3,
+      })
+      state.tokenUsageSessionsPage = sessionsPage(1, 10)
+      const sessionPanel = () =>
+        [...win.document.querySelectorAll(".panel")].find(
+          (node) =>
+            node.querySelector(".panel-title")?.textContent
+            === "Session Breakdown",
+        )!
+      const sessionIds = () =>
+        [...sessionPanel().querySelectorAll("tbody tr td:first-child")].map(
+          (node) => node.textContent,
+        )
+      const nextButton = () =>
+        sessionPanel().querySelector('[data-session-page="1"]')!
+      const previousButton = () =>
+        sessionPanel().querySelector('[data-session-page="-1"]')!
+
+      win.document.body.innerHTML = viewer.renderTokenUsageSection()
+      expect(sessionIds()).toHaveLength(10)
+      expect(sessionIds()[0]).toBe("session-1")
+      expect(sessionPanel().textContent).toContain("Page 1 / 3 - 25 sessions")
+      expect(previousButton().hasAttribute("disabled")).toBe(true)
+      expect(nextButton().hasAttribute("disabled")).toBe(false)
+
+      state.tokenUsageSessionsPage = sessionsPage(3, 5)
+      win.document.body.innerHTML = viewer.renderTokenUsageSection()
+      expect(sessionIds()).toEqual([
+        "session-21",
+        "session-22",
+        "session-23",
+        "session-24",
+        "session-25",
+      ])
+      expect(nextButton().hasAttribute("disabled")).toBe(true)
+
+      state.isSessionsLoading = true
+      win.document.body.innerHTML = viewer.renderTokenUsageSection()
+      expect(previousButton().hasAttribute("disabled")).toBe(true)
+
+      state.isSessionsLoading = false
+      state.tokenUsageSessionsError = "boom"
+      win.document.body.innerHTML = viewer.renderTokenUsageSection()
+      expect(sessionPanel().textContent).toContain("boom")
+      expect(
+        sessionPanel().querySelector('[data-session-page="0"]'),
+      ).not.toBeNull()
     } finally {
       await win.happyDOM.close()
     }
   })
+})
+
+describe("usage viewer session fetching", () => {
+  async function createSessionsFetcher() {
+    const html = await readUsageViewerPage()
+    const source = [
+      extractInlineFunctionRange(
+        html,
+        "        function resolveUsageUrl(endpoint) {",
+        "        async function fetchJson(url) {",
+      ),
+      extractInlineFunctionRange(
+        html,
+        "        async function fetchData(page = 1) {",
+        "        // --- Event Handlers & Initialization ---",
+      ),
+      "({ fetchData, fetchTokenUsageSummaryAndEvents, fetchTokenUsageSessionsPage, invalidateSessionsRequest })",
+    ].join("\n")
+    const pending: Array<{
+      url: string
+      resolve: (value: unknown) => void
+      reject: (reason: unknown) => void
+    }> = []
+    const state = {
+      isLoading: false,
+      isTokenUsageLoading: false,
+      tokenUsageSummaryError: null as string | null,
+      isSessionsLoading: false,
+      sessionsRequestId: 0,
+      tokenUsageSessionsError: null as string | null,
+      tokenUsageSessionsPage: null as unknown,
+    }
+    const endpointUrlInput = { value: "http://server-a/usage" }
+    const rendering = { onRender: () => {} }
+    const viewer = runInNewContext(source, {
+      state,
+      endpointUrlInput,
+      window: { location: { href: "http://localhost/usage-viewer" } },
+      URL,
+      SESSION_PAGE_SIZE: 10,
+      DEFAULT_TOKEN_USAGE_EVENTS_PAGE_SIZE: 20,
+      render: () => rendering.onRender(),
+      getSelectedPeriod: () => "today",
+      getErrorMessage: (error: Error) => error.message,
+      isMissingTokenUsageEndpointError: (error: unknown) =>
+        typeof error === "object"
+        && error !== null
+        && "status" in error
+        && error.status === 404,
+      fetchJson: (url: string) =>
+        new Promise((resolve, reject) =>
+          pending.push({ url, resolve, reject }),
+        ),
+    }) as {
+      fetchData: () => Promise<void>
+      fetchTokenUsageSummaryAndEvents: () => Promise<void>
+      fetchTokenUsageSessionsPage: (page: number) => Promise<void>
+      invalidateSessionsRequest: () => void
+    }
+    return { endpointUrlInput, pending, rendering, state, viewer }
+  }
+
+  test("ignores a response that arrives after the context changed", async () => {
+    const { pending, state, viewer } = await createSessionsFetcher()
+    const stale = viewer.fetchTokenUsageSessionsPage(2)
+    viewer.invalidateSessionsRequest()
+    const current = viewer.fetchTokenUsageSessionsPage(1)
+
+    pending[1].resolve({ page: 1, items: [] })
+    await current
+    pending[0].resolve({ page: 2, items: [] })
+    await stale
+
+    expect(state.tokenUsageSessionsPage).toEqual({ page: 1, items: [] })
+    expect(state.isSessionsLoading).toBe(false)
+  })
+
+  test("ignores a stale failure and surfaces a current failure", async () => {
+    const { pending, state, viewer } = await createSessionsFetcher()
+    const stale = viewer.fetchTokenUsageSessionsPage(2)
+    viewer.invalidateSessionsRequest()
+    pending[0].reject(new Error("old failure"))
+    await stale
+    expect(state.tokenUsageSessionsError).toBeNull()
+
+    const current = viewer.fetchTokenUsageSessionsPage(1)
+    pending[1].reject(new Error("sessions failed"))
+    await current
+    expect(state.tokenUsageSessionsError).toBe("sessions failed")
+    expect(state.isSessionsLoading).toBe(false)
+  })
+
+  const refreshMethods = [
+    "fetchData",
+    "fetchTokenUsageSummaryAndEvents",
+  ] as const
+
+  test.each([...refreshMethods])(
+    "%s clears old sessions when refreshing another endpoint fails",
+    async (refreshMethod) => {
+      const { endpointUrlInput, pending, state, viewer } =
+        await createSessionsFetcher()
+      const oldPage = { page: 2, items: [{ session_id: "server-a-session" }] }
+      state.tokenUsageSessionsPage = oldPage
+      const stale = viewer.fetchTokenUsageSessionsPage(2)
+      state.tokenUsageSessionsError = "old sessions error"
+      endpointUrlInput.value = "http://server-b/usage"
+
+      const refresh = viewer[refreshMethod]()
+      expect(state.tokenUsageSessionsPage).toBeNull()
+      expect(state.tokenUsageSessionsError).toBeNull()
+      expect(state.isSessionsLoading).toBe(false)
+      expect(
+        pending.slice(1).every(({ url }) => new URL(url).host === "server-b"),
+      ).toBe(true)
+
+      const unauthorized = Object.assign(new Error("Unauthorized"), {
+        status: 401,
+      })
+      for (const request of pending.slice(1)) {
+        request.reject(unauthorized)
+      }
+      await refresh
+      pending[0].resolve(oldPage)
+      await stale
+
+      expect(state.tokenUsageSessionsPage).toBeNull()
+      expect(state.tokenUsageSessionsError).toBeNull()
+      expect(state.tokenUsageSummaryError).toBe("Unauthorized")
+      expect(state.isSessionsLoading).toBe(false)
+      expect(
+        pending.filter(({ url }) =>
+          new URL(url).pathname.endsWith("/sessions"),
+        ),
+      ).toHaveLength(1)
+    },
+  )
+
+  test.each([...refreshMethods])(
+    "%s clears old sessions and rejects a late response for an empty endpoint",
+    async (refreshMethod) => {
+      const { endpointUrlInput, pending, state, viewer } =
+        await createSessionsFetcher()
+      const oldPage = { page: 2, items: [{ session_id: "server-a-session" }] }
+      state.tokenUsageSessionsPage = oldPage
+      const stale = viewer.fetchTokenUsageSessionsPage(2)
+      state.tokenUsageSessionsError = "old sessions error"
+      endpointUrlInput.value = "   "
+
+      await viewer[refreshMethod]()
+      expect(state.tokenUsageSessionsPage).toBeNull()
+      expect(state.tokenUsageSessionsError).toBeNull()
+      expect(state.isSessionsLoading).toBe(false)
+      expect(pending).toHaveLength(1)
+
+      pending[0].resolve(oldPage)
+      await stale
+      expect(state.tokenUsageSessionsPage).toBeNull()
+      expect(state.isSessionsLoading).toBe(false)
+    },
+  )
+
+  test.each([...refreshMethods])(
+    "%s loads the new endpoint's sessions after clearing the previous page",
+    async (refreshMethod) => {
+      const { endpointUrlInput, pending, rendering, state, viewer } =
+        await createSessionsFetcher()
+      state.tokenUsageSessionsPage = {
+        page: 2,
+        items: [{ session_id: "server-a-session" }],
+      }
+      endpointUrlInput.value = "http://server-b/usage"
+
+      const refresh = viewer[refreshMethod]()
+      expect(state.tokenUsageSessionsPage).toBeNull()
+      for (const request of pending) {
+        request.resolve({})
+      }
+      await refresh
+
+      const sessions = pending.at(-1)!
+      expect(sessions.url).toBe(
+        "http://server-b/token-usage/sessions?period=today&page=1&page_size=10",
+      )
+      expect(state.isSessionsLoading).toBe(true)
+      const newPage = { page: 1, items: [{ session_id: "server-b-session" }] }
+      const sessionRendered = new Promise<void>((resolve) => {
+        rendering.onRender = () => resolve()
+      })
+      sessions.resolve(newPage)
+      await sessionRendered
+
+      expect(state.tokenUsageSessionsPage).toEqual(newPage)
+      expect(state.isSessionsLoading).toBe(false)
+    },
+  )
 })
 
 describe("usage viewer Copilot quota", () => {
