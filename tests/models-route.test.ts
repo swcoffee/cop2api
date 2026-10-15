@@ -2671,14 +2671,60 @@ describe("model routes", () => {
     expect(
       body.models.find((model) => model.slug === "gpt-responses-http")
         ?.description,
-    ).toBe("gpt-responses-http through the Copilot Responses API.")
+    ).toBe("gpt-responses-http")
     expect(
       body.models.find((model) => model.slug === "gpt-responses-websocket")
         ?.description,
-    ).toBe("gpt-responses-websocket through the Copilot Responses API.")
+    ).toBe("gpt-responses-websocket")
   })
 
-  test("describes non-GPT Responses-capable Copilot models as adapter-backed", async () => {
+  test("discovers native Google models in both the regular list and Codex Messages catalog", async () => {
+    enabledProviders = ["google"]
+    providerConfigs.google = {
+      name: "google",
+      type: "google",
+      baseUrl: "https://google.example/v1beta",
+      apiKey: "google-key",
+      authType: "x-goog-api-key",
+    }
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(
+        Response.json({
+          models: [
+            {
+              name: "models/gemini-3.8-flash",
+              displayName: "Gemini Flash",
+              inputTokenLimit: 1048576,
+              outputTokenLimit: 65536,
+              supportedGenerationMethods: ["generateContent"],
+            },
+          ],
+        }),
+      ),
+    )
+    const app = createApp()
+    const regular = await app.request("/v1/models")
+    expect(await regular.json()).toHaveProperty(
+      "data",
+      expect.arrayContaining([
+        expect.objectContaining({ id: "google/gemini-3.8-flash" }),
+      ]),
+    )
+    const response = await app.request("/v1/models?client=codex", {
+      headers: { "user-agent": "codex-cli/1.0.0" },
+    })
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as CodexModelsResponse
+    expect(
+      body.models.find((model) => model.slug === "google/gemini-3.8-flash"),
+    ).toMatchObject({
+      description: "Gemini Flash",
+      use_responses_lite: true,
+      context_window: 1048576,
+    })
+  })
+
+  test("uses model names for Copilot model descriptions", async () => {
     const copilotModels = createCopilotModels([
       "claude-sonnet-4.6",
       "gemini-3-pro",
@@ -2701,10 +2747,10 @@ describe("model routes", () => {
     expect(
       body.models.find((model) => model.slug === "claude-sonnet-4-6")
         ?.description,
-    ).toBe("claude-sonnet-4.6 through the Copilot Messages adapter.")
+    ).toBe("claude-sonnet-4.6")
     expect(
       body.models.find((model) => model.slug === "gemini-3-pro")?.description,
-    ).toBe("gemini-3-pro through the Copilot Messages-to-Responses adapter.")
+    ).toBe("gemini-3-pro")
   })
 
   test("uses the bundled Codex catalog when the Codex provider is missing", async () => {
