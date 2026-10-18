@@ -769,7 +769,7 @@ describe('provider management UI', () => {
     expect(container.textContent).toContain('stop failed')
   })
 
-  test.each(['Logs', 'Token usage', 'Model mappings'])(
+  test.each(['Logs', 'Token usage', 'Advanced config'])(
     'keeps the %s tab during an automatic restart',
     async (tabLabel) => {
       let notify: ((status: ServerStatus) => void) | undefined
@@ -777,8 +777,13 @@ describe('provider management UI', () => {
         getServerStatus: () =>
           Promise.resolve({ running: true, port: 4141, host: '127.0.0.1' }),
         getServerAuthInfo: () => Promise.resolve({ enabled: false }),
-        getModelMappingsConfig: () =>
-          Promise.resolve({ configPath: 'config.json', modelMappings: {} }),
+        getAppConfig: () =>
+          Promise.resolve({
+            configPath: 'config.json',
+            content: '{}',
+            revision: 'revision',
+            defaultContent: '{}',
+          }),
         onServerStatus: (callback: (status: ServerStatus) => void) => {
           notify = callback
           return () => {
@@ -799,7 +804,8 @@ describe('provider management UI', () => {
         )
       })
       await act(async () => button(tabLabel).click())
-      if (tabLabel === 'Model mappings') {
+      if (tabLabel === 'Advanced config') {
+        await act(async () => button('Model mappings').click())
         await act(async () => button('Add mapping').click())
         await changeText(
           container.querySelector<HTMLInputElement>('input')!,
@@ -828,7 +834,7 @@ describe('provider management UI', () => {
       expect(button('Restart').disabled).toBe(false)
       expect(button('Stop').disabled).toBe(false)
       expect(fetchModels).toHaveBeenCalledTimes(modelFetchCount + 1)
-      if (tabLabel === 'Model mappings') {
+      if (tabLabel === 'Advanced config') {
         expect(container.querySelector<HTMLInputElement>('input')?.value).toBe(
           'draft-model',
         )
@@ -1008,7 +1014,7 @@ describe('provider management UI', () => {
     expect(container.textContent).toContain('copilot_pro')
   })
 
-  test('places the Providers tab before Model Mappings and allows management while stopped', async () => {
+  test('allows provider management and advanced configuration while stopped', async () => {
     await act(async () => {
       root.render(
         createElement(LanguageProvider, {
@@ -1026,8 +1032,8 @@ describe('provider management UI', () => {
     ]
     expect(tabs[2].textContent).toBe('Providers')
     expect(tabs[2].disabled).toBe(false)
-    expect(tabs[3].textContent?.toLowerCase()).toContain('model mappings')
-    expect(tabs[3].disabled).toBe(true)
+    expect(tabs[3].textContent?.toLowerCase()).toContain('advanced config')
+    expect(tabs[3].disabled).toBe(false)
     await act(async () => {
       tabs[2].click()
     })
@@ -1083,6 +1089,46 @@ describe('provider management UI', () => {
       providers: { dashscope: { agentsModels: ['qwen-plus'] } },
     })
   })
+
+  test('lists enabled providers before disabled ones', async () => {
+    getConfig.mockImplementation(() =>
+      Promise.resolve({
+        configPath: 'config.json',
+        providers: [
+          {
+            name: 'codex',
+            type: 'openai-responses',
+            enabled: false,
+            agentsModels: [],
+          },
+          { name: 'dashscope', type: 'openai-compatible', enabled: true },
+          { name: 'gemini', type: 'google', enabled: false },
+        ],
+      }),
+    )
+    await act(async () => {
+      root.render(
+        createElement(LanguageProvider, {
+          children: createElement(ProviderManagementPanel, {}),
+        }),
+      )
+    })
+    const names = () =>
+      [...container.querySelectorAll('nav button')].map((node) =>
+        node.getAttribute('aria-label'),
+      )
+    expect(names()).toEqual(['dashscope', 'codex', 'gemini'])
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('nav button[aria-label="gemini"]')!
+        .click()
+    })
+    await act(async () => {
+      container.querySelector<HTMLInputElement>('[role="switch"]')!.click()
+    })
+    expect(names()).toEqual(['dashscope', 'gemini', 'codex'])
+  })
+
   test('keeps selected models first while searching and preserves unknown selections', async () => {
     getConfig.mockImplementation(() =>
       Promise.resolve({

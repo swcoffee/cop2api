@@ -1,3 +1,4 @@
+import type { ConfigFieldId, ConfigSection } from '../lib/config-fields'
 import en from './en'
 import zh from './zh'
 
@@ -309,6 +310,60 @@ export interface Locale {
     save: string
     saving: string
   }
+  configEditor: {
+    title: string
+    editMode: string
+    form: string
+    json: string
+    groupsLabel: string
+    resetGroup: string
+    useDefault: string
+    inherited: string
+    explicit: string
+    defaultValue: string
+    explicitValue: string
+    reload: string
+    reloadDiscard: string
+    mergeLatest: string
+    mergeConflicts: string
+    keepMine: string
+    keepDisk: string
+    merged: string
+    legacyWarning: string
+    errors: {
+      conflict: string
+      validation: string
+      readFailed: string
+      saveFailed: string
+      applyFailed: string
+    }
+    discard: string
+    review: string
+    close: string
+    saveApply: string
+    save: string
+    synced: string
+    unsaved: string
+    unsavedOther: string
+    offline: string
+    invalid: string
+    savedApplied: string
+    savedOffline: string
+    savedNotApplied: string
+    retryApply: string
+    showSecrets: string
+    format: string
+    jsonContent: string
+    sharedDraft: string
+    maskedReadOnly: string
+    maskedUnavailable: string
+    mappingDefaults: string
+    autoModelDefault: string
+    autoModelOff: string
+    autoModelCustom: string
+    groups: Record<ConfigSection, string>
+    fields: Record<ConfigFieldId, { label: string; description: string }>
+  }
   advancedConfig: {
     title: string
     subtitle: string
@@ -377,7 +432,8 @@ function interpolate(template: string, vars?: LocaleVars): string {
 
   let result = template
   for (const [key, value] of Object.entries(vars)) {
-    result = result.replace(`{{${key}}}`, String(value))
+    // A function replacer keeps $&, $$, $` and $' literal in the value.
+    result = result.replace(`{{${key}}}`, () => String(value))
   }
   return result
 }
