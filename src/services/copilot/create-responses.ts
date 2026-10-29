@@ -19,7 +19,10 @@ import {
   prepareInteractionHeaders,
 } from "~/lib/api-config"
 import { COMPACT_REQUEST, type CompactType } from "~/lib/compact"
-import { getUpstreamTransportConfig } from "~/lib/config"
+import {
+  getUpstreamTransportConfig,
+  isOutputEncryptedContentDisabled,
+} from "~/lib/config"
 import {
   logCopilotQuotaSnapshots,
   logCopilotRateLimits,
@@ -77,6 +80,7 @@ export const createResponses = async (
 
   // service_tier is not supported by github copilot
   payload.service_tier = undefined
+  const upstreamPayload = omitUnsupportedCopilotInclude(payload)
 
   consola.log(`<-- model: ${payload.model}`)
 
@@ -87,7 +91,7 @@ export const createResponses = async (
   if (payload.stream === true && effectiveTransport === "websocket") {
     clientSignal?.throwIfAborted()
     const websocketRequest = prepareResponsesWebSocketRequest(
-      payload,
+      upstreamPayload,
       headers,
       {
         requestId,
@@ -101,7 +105,29 @@ export const createResponses = async (
     return stream
   }
 
-  return await createHttpResponses(payload, headers, clientSignal)
+  return await createHttpResponses(upstreamPayload, headers, clientSignal)
+}
+
+const omitUnsupportedCopilotInclude = (
+  payload: ResponsesPayload,
+): ResponsesPayload => {
+  if (
+    !payload.include?.includes("output.encrypted_content")
+    || !isOutputEncryptedContentDisabled(payload.model)
+  ) {
+    return payload
+  }
+
+  const include = payload.include.filter(
+    (item) => item !== "output.encrypted_content",
+  )
+  const upstreamPayload = { ...payload }
+  if (include.length === 0) {
+    delete upstreamPayload.include
+  } else {
+    upstreamPayload.include = include
+  }
+  return upstreamPayload
 }
 
 const createHttpResponses = async (
