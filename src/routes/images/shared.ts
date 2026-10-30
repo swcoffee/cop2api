@@ -10,12 +10,19 @@ import {
   getImageEditModel,
   getImageGenerationModel,
 } from "~/lib/xai-image-model"
-import { forwardProviderImagesWithLogging } from "~/routes/images/forward-provider-images"
+import {
+  forwardProviderImagesWithLogging,
+  forwardXaiImagesWithLogging,
+} from "~/routes/images/forward-provider-images"
 import {
   forwardCodexImages,
   type CodexImagesOperation,
 } from "~/services/codex/images"
 import { createProviderProxyResponse } from "~/services/providers/provider-proxy"
+import {
+  translateXaiImageEditJson,
+  translateXaiImageGeneration,
+} from "~/services/xai/images"
 
 export const logger = createHandlerLogger("images-handler")
 
@@ -29,7 +36,10 @@ export const imageRouteDependencies = {
 
 export interface ParsedImagesRequest {
   /** Rebuilds the forwarding request with the resolved model in the body. */
-  createRequest: (model: string) => Request
+  createRequest: (
+    model: string,
+    provider?: string,
+  ) => Request | Promise<Request>
   model: string
   /** Unchanged request, forwarded as-is when no rebuild is needed. */
   originalRequest?: Request
@@ -41,13 +51,13 @@ export function imageEditContentTypeErrorResponse(c: Context): Response | null {
     ?.split(";", 1)[0]
     ?.trim()
     .toLowerCase()
-  if (mediaType === "application/json") return null
+  if (mediaType === "application/json" || mediaType === "multipart/form-data")
+    return null
 
   return c.json(
     {
       error: {
-        message:
-          "Image edits require application/json with images: [{ image_url }] or [{ file_id }]; multipart uploads are not supported",
+        message: "Image edits require application/json or multipart/form-data",
         type: "invalid_request_error",
       },
     },
@@ -225,9 +235,26 @@ export async function routeImagesRequest(
       providerModelAlias.provider,
     )
     if (providerConfig) {
-      const request = parsed.createRequest(providerModelAlias.model)
+      const request = await parsed.createRequest(
+        providerModelAlias.model,
+        providerConfig.name,
+      )
       if (providerConfig.name === "codex") {
         return await handleCodexImages(c, operation, providerConfig, request)
+      }
+      if (providerConfig.name === "xai") {
+        const payload: unknown = await request.json()
+        const translated =
+          operation === "edits" ?
+            translateXaiImageEditJson(payload, providerModelAlias.model)
+          : translateXaiImageGeneration(payload, providerModelAlias.model)
+        return await forwardXaiImagesWithLogging(
+          providerConfig,
+          request,
+          operation,
+          translated,
+          { logger, provider: providerModelAlias.provider },
+        )
       }
 
       return await forwardProviderImagesWithLogging(
@@ -247,7 +274,7 @@ export async function routeImagesRequest(
       c,
       operation,
       undefined,
-      parsed.originalRequest ?? parsed.createRequest(requestedModel),
+      parsed.originalRequest ?? (await parsed.createRequest(requestedModel)),
     )
   }
 
@@ -264,6 +291,6 @@ export async function routeImagesRequest(
     c,
     operation,
     undefined,
-    parsed.createRequest(mappedModel),
+    await parsed.createRequest(mappedModel),
   )
 }
