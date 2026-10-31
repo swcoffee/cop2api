@@ -10,6 +10,8 @@ Recommended Codex version: `0.160.0` or newer. These clients can load the model 
 
 Remote catalog responses are limited to 1 MiB of JSON. When the merged catalog is larger, the gateway keeps models selected through provider `agentsModels` first and drops the rest. Select the models you need on the Providers page, or generate a local catalog for the complete list.
 
+Codex client catalogs always exclude image-only models, even when `agentsModels` explicitly selects them. Chat models that accept images remain eligible. OpenCode can discover image-only models through the same selection; the ordinary aggregated catalog also includes image models independently of `agentsModels`.
+
 When `modelMappings` maps a bare `model` to the same `codex/model`, the Codex catalog omits the duplicate `codex/model` entry and retains the bare entry's complete metadata. This also applies to the default `codex-auto-review` and `gpt-reserve` mappings. Explicit prefixed requests remain supported; mappings to another model or provider retain the prefixed entry.
 
 ### Codex `config.toml` Reference
@@ -78,6 +80,8 @@ enabled = false
 >
 > Set `GITHUB_COPILOT_API_KEY` as a system-level user environment variable so the Codex app can read it too. Use one of the [gateway API keys](cli.md#auth-command-options), or any non-empty placeholder when none are configured; if it is unset, Codex fails with a `Missing environment variable` error.
 
+For upstream providers that cannot handle encrypted Multi-Agent messages, enable the gateway's [`codexMultiAgentV1` option](configuration.md#codex-multi-agent-compatibility) in `config.json` or Desktop Advanced config. V2 remains the default. Apply the gateway configuration, refresh the remote catalog (or regenerate your local catalog), and start a **new Codex session**. Catalog refreshes do not switch a running session's already-selected version; resuming restores the recorded version. Existing encrypted history is not converted. Explicit CLI feature overrides may take precedence over both the recorded version and catalog metadata.
+
 ### Auto Review Model Mapping
 
 When using `approvals_reviewer = "auto_review"` through the top-level GitHub Copilot route, add this mapping to the gateway's `config.json`:
@@ -94,7 +98,7 @@ Alternatively, set `"codex-auto-review": "codex/codex-auto-review"` to use the b
 
 ### Generate `model_catalog.json`
 
-Use a local catalog for the complete list, for Codex versions before `0.160.0`, or to avoid the 1 MiB remote response limit. The generator sends `x-full-model-catalog: true`, bypassing the size and default-exclusion limits while still respecting provider enable states and `agentsModels` selections. This header never reaches upstream providers. See [configuration](configuration.md) for provider selections.
+Use a local catalog for the complete list, for Codex versions before `0.160.0`, or to avoid the 1 MiB remote response limit. The generator sends `x-full-model-catalog: true`, bypassing the size and default-exclusion limits while still respecting provider enable states, `agentsModels` selections, and the image-only model filter. This header never reaches upstream providers. See [configuration](configuration.md) for provider selections.
 
 Start the gateway, install `curl` and Bun or Node.js, then run [the generator](../../generate-model-catalog.sh) from the repository root:
 

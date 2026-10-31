@@ -16,7 +16,6 @@ import {
 import {
   normalizeImagesUsage,
   observeImagesResponse,
-  readImageRequestModel,
 } from "~/lib/token-usage/images"
 import { resolveTokenUsageCost } from "~/lib/token-usage/pricing"
 import { logImageEditRequest } from "~/routes/images/request-logging"
@@ -35,6 +34,46 @@ const sampleUsage = {
   output_tokens_details: { image_tokens: 1372, text_tokens: 0 },
   total_tokens: 1386,
 }
+const copilotImageUsage = {
+  token_details: [
+    {
+      batch_size: 1_000_000,
+      cost_per_batch: 500_000_000_000,
+      model: "gpt-image-2.5-flare",
+      token_count: 73,
+      token_type: "input",
+    },
+    {
+      batch_size: 1_000_000,
+      cost_per_batch: 0,
+      model: "gpt-image-2.5-flare",
+      token_count: 0,
+      token_type: "cache_read",
+    },
+    {
+      batch_size: 1_000_000,
+      cost_per_batch: 0,
+      model: "gpt-image-2.5-flare",
+      token_count: 0,
+      token_type: "cache_write",
+    },
+    {
+      batch_size: 1_000_000,
+      cost_per_batch: 0,
+      model: "gpt-image-2.5-flare",
+      token_count: 0,
+      token_type: "output",
+    },
+    {
+      batch_size: 1_000_000,
+      cost_per_batch: 3_000_000_000_000,
+      model: "gpt-image-2.5-flare",
+      token_count: 158,
+      token_type: "image_output",
+    },
+  ],
+  total_nano_aiu: 510_500_000,
+}
 const originalDbPath = process.env.COPILOT_API_SQLITE_DB_PATH
 
 beforeEach(async () => {
@@ -51,6 +90,127 @@ afterEach(async () => {
 
 const events = () =>
   getTokenUsageEventsPage({ period: "today", page: 1, pageSize: 20 })
+
+describe("Copilot image usage", () => {
+  test.each(["json", "sse"])(
+    "reads standard usage and Copilot image charges from %s responses",
+    async (format) => {
+      const payload = {
+        data: [{ b64_json: "image" }],
+        usage: sampleUsage,
+        copilot_usage: copilotImageUsage,
+      }
+      const text =
+        format === "json" ?
+          JSON.stringify(payload)
+        : `event: image_generation.completed\ndata: ${JSON.stringify(payload)}\n\ndata: [DONE]\n\n`
+      const response = observeImagesResponse(
+        new Response(text, {
+          headers: {
+            "content-type":
+              format === "json" ? "application/json" : "text/event-stream",
+          },
+        }),
+        {
+          providerConfig: { ...codex, name: "github-copilot" },
+          model: "gpt-image-2.5-flare",
+          operation: "generations",
+          onMetadata: () => {},
+        },
+      )
+      expect(await response.text()).toBe(text)
+      const page = await events()
+      expect(page.items).toHaveLength(1)
+      expect(page.items[0]).toMatchObject({
+        source: "copilot",
+        provider_name: "github-copilot",
+        input_tokens: sampleUsage.input_tokens,
+        output_tokens: sampleUsage.output_tokens,
+        total_tokens: sampleUsage.total_tokens,
+        total_nano_aiu: 510_500_000,
+        cost: { amount: 0.005105, currency: "USD", source: "copilot_aiu" },
+      })
+    },
+  )
+
+  test.each(["usage-first", "cost-first"])(
+    "keeps usage and Copilot charges from separate SSE events (%s)",
+    async (order) => {
+      const chunks = [
+        `data: ${JSON.stringify({ usage: sampleUsage })}\n\n`,
+        `data: ${JSON.stringify({ copilot_usage: copilotImageUsage })}\n\n`,
+      ]
+      if (order === "cost-first") chunks.reverse()
+      const text = `${chunks.join("")}data: [DONE]\n\n`
+      const response = observe(new Response(text), {
+        ...codex,
+        name: "github-copilot",
+      })
+      await response.text()
+      expect((await events()).items[0]).toMatchObject({
+        input_tokens: 14,
+        output_tokens: 1372,
+        total_tokens: 1386,
+        total_nano_aiu: 510_500_000,
+        cost: { amount: 0.005105, source: "copilot_aiu" },
+      })
+    },
+  )
+
+  test("does not infer token usage from Copilot billing details", async () => {
+    const response = observe(
+      Response.json({ copilot_usage: copilotImageUsage }),
+      {
+        ...codex,
+        name: "github-copilot",
+      },
+    )
+    await response.text()
+    expect((await events()).items[0]).toMatchObject({
+      input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: 0,
+      total_nano_aiu: 510_500_000,
+      cost: { amount: 0.005105, source: "copilot_aiu" },
+    })
+  })
+
+  test.each([undefined, null, -1, "510500000"])(
+    "retains standard usage when the reported Copilot charge is invalid (%s)",
+    async (charge) => {
+      const response = observe(
+        Response.json({
+          usage: sampleUsage,
+          copilot_usage: { ...copilotImageUsage, total_nano_aiu: charge },
+        }),
+        { ...codex, name: "github-copilot" },
+      )
+      await response.text()
+      expect((await events()).items[0]).toMatchObject({
+        input_tokens: sampleUsage.input_tokens,
+        output_tokens: sampleUsage.output_tokens,
+        total_tokens: sampleUsage.total_tokens,
+        total_nano_aiu: null,
+        cost: null,
+      })
+    },
+  )
+
+  test("does not apply Copilot charges to other providers or failed responses", async () => {
+    const payload = { data: [], copilot_usage: copilotImageUsage }
+    for (const [provider, status] of [
+      ["codex", 200],
+      ["github-copilot", 429],
+    ] as const) {
+      const response = observe(Response.json(payload, { status }), {
+        ...codex,
+        name: provider,
+      })
+      await response.text()
+    }
+    expect((await events()).items).toHaveLength(0)
+  })
+})
 
 function observe(
   response: Response,
@@ -394,67 +554,6 @@ describe("image usage and pricing", () => {
 })
 
 describe("image request metadata and logs", () => {
-  test("uses the supplied default only when valid JSON omits the model", async () => {
-    const read = (body: string) =>
-      readImageRequestModel(
-        new Request("http://localhost", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body,
-        }),
-        undefined,
-        "gpt-image-2",
-      )
-    expect(await read('{"prompt":"edit","images":[]}')).toBe("gpt-image-2")
-    expect(await read('{"model":"gpt-image-2.5","prompt":"edit"}')).toBe(
-      "gpt-image-2.5",
-    )
-    for (const body of [
-      "invalid",
-      "null",
-      "[]",
-      '{"model":null}',
-      '{"model":3}',
-    ]) {
-      expect(await read(body)).toBe("unknown")
-    }
-    expect(
-      await readImageRequestModel(
-        new Request("http://localhost"),
-        "unknown",
-        "gpt-image-2",
-      ),
-    ).toBe("unknown")
-  })
-
-  test("reads a model without consuming or rewriting the request", async () => {
-    const request = new Request("http://localhost", {
-      method: "POST",
-      body: '{ "model": "gpt-image-2", "prompt": "cat" }',
-    })
-    expect(await readImageRequestModel(request)).toBe("gpt-image-2")
-    expect(await readImageRequestModel(request, "mapped-model")).toBe(
-      "mapped-model",
-    )
-    expect(await request.text()).toBe(
-      '{ "model": "gpt-image-2", "prompt": "cat" }',
-    )
-    for (const body of ["invalid", "null", "{}", '{"model":3}'])
-      expect(
-        await readImageRequestModel(
-          new Request("http://localhost", { method: "POST", body }),
-        ),
-      ).toBe("unknown")
-    expect(
-      await readImageRequestModel(
-        new Request("http://localhost", {
-          method: "POST",
-          body: new FormData(),
-        }),
-      ),
-    ).toBe("unknown")
-  })
-
   test("logs edit fields with nested image and mask base64 removed", async () => {
     state.verbose = true
     const logger = consola.create({ reporters: [] })
@@ -505,7 +604,7 @@ describe("image request metadata and logs", () => {
     expect(JSON.stringify(logged)).not.toContain("secret-")
   })
 
-  test("logs multipart metadata, handles invalid JSON, and stays lazy without debug", async () => {
+  test("logs selected staged fields without consuming the multipart body", async () => {
     const logger = consola.create({ reporters: [] })
     const debug = Object.assign(
       mock((_label: string, _value: string) => {}),
@@ -523,20 +622,75 @@ describe("image request metadata and logs", () => {
     await (await logImageEditRequest(logger, "edit", request)).text()
     expect(debug.mock.calls[0]?.[1]).toContain("[unavailable JSON body]")
     const form = new FormData()
+    form.append("model", "image-model")
     form.append("prompt", "a cat")
+    form.append("size", "1024x1024")
+    form.append("private_option", "do-not-log")
     form.append(
       "image",
       new File(["secret-image"], "cat.png", { type: "image/png" }),
     )
-    await logImageEditRequest(
+    let pulls = 0
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull() {
+          pulls++
+          throw new Error("multipart body must not be read for logging")
+        },
+      },
+      { highWaterMark: 0 },
+    )
+    const multipart = new Request("http://localhost", {
+      method: "POST",
+      headers: { "content-type": "multipart/form-data; boundary=example" },
+      body,
+      duplex: "half",
+    } as RequestInit)
+    const forwarded = await logImageEditRequest(
       logger,
       "edit",
-      new Request("http://localhost", { method: "POST", body: form }),
+      multipart,
       { provider: "custom" },
+      undefined,
+      form,
     )
     const logged = debug.mock.calls[1]?.[1] ?? ""
-    expect(logged).toContain('"filename":"cat.png"')
-    expect(logged).toContain('"value":"a cat"')
+    expect(JSON.parse(logged)).toMatchObject({
+      provider: "custom",
+      body: [
+        { name: "model", value: "image-model" },
+        { name: "prompt", value: "a cat" },
+        { name: "size", value: "1024x1024" },
+      ],
+    })
     expect(logged).not.toContain("secret-image")
+    expect(logged).not.toContain("do-not-log")
+    expect(logged).not.toContain("cat.png")
+    expect(forwarded.bodyUsed).toBe(false)
+    expect(pulls).toBe(0)
+    await forwarded.body?.cancel()
+  })
+
+  test("bounds long multipart log fields without changing the form", async () => {
+    state.verbose = true
+    const logger = consola.create({ reporters: [] })
+    const debug = Object.assign(
+      mock((_label: string, _value: string) => {}),
+      { raw: logger.debug.raw },
+    )
+    logger.debug = debug
+    const form = new FormData()
+    const prompt = "x".repeat(10_000)
+    form.set("prompt", prompt)
+    const request = new Request("http://localhost", {
+      method: "POST",
+      body: form,
+    })
+    await logImageEditRequest(logger, "edit", request, {}, undefined, form)
+    const logged = debug.mock.calls[0]?.[1] ?? ""
+    expect(logged).toContain("[truncated]")
+    expect(logged.length).toBeLessThan(9_000)
+    expect(form.get("prompt")).toBe(prompt)
+    expect(request.bodyUsed).toBe(false)
   })
 })

@@ -22,6 +22,33 @@ import {
 const encoder = new TextEncoder()
 const url = "http://localhost/v1/images/edits"
 
+test.each([
+  {},
+  {
+    prompt: "a cat \u{1f408} caf\u00e9",
+    nested: { model: "nested-model" },
+    n: 1,
+  },
+  {
+    images: [{ image_url: `data:image/png;base64,${"A".repeat(100_000)}` }],
+    prompt: "edit",
+  },
+])(
+  "inserts a missing image model without dropping fields %#",
+  async (payload) => {
+    const request = new Request(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    })
+    const parsed = await prepareImageJsonRequest(request)
+    expect(await parsed.createRequest("gpt-image-2.5-flare").json()).toEqual({
+      ...payload,
+      model: "gpt-image-2.5-flare",
+    })
+  },
+)
+
 async function expectFailure(
   promise: Promise<unknown>,
   expected?: string | Error,
@@ -183,7 +210,6 @@ describe("streaming image JSON", () => {
         model,
       })
       const parsed = await prepareImageJsonRequest(request(chunks(text)))
-      expect(parsed.valid).toBe(true)
       expect(parsed.model).toBe(model)
       expect(parsed.stagedDirectory).toBeDefined()
       await access(parsed.stagedDirectory!)
@@ -246,7 +272,7 @@ describe("streaming image JSON", () => {
     ).toBe(false)
   })
 
-  test("preserves invalid JSON, nonobjects, invalid model types, and non-UTF8 bytes", async () => {
+  test("rejects invalid JSON, nonobjects, invalid model types, and non-UTF8 bytes", async () => {
     for (const text of [
       "not-json",
       "null",
@@ -258,18 +284,20 @@ describe("streaming image JSON", () => {
       '{"model":[]}',
       '{"model":"' + "x".repeat(5000) + '"}',
     ]) {
-      const parsed = await prepareImageJsonRequest(request(text))
-      expect(parsed.valid).toBe(false)
-      expect(await parsed.originalRequest.text()).toBe(text)
+      await expectFailure(prepareImageJsonRequest(request(text)), "Image")
     }
     const raw = Uint8Array.of(123, 255, 125)
+    await expectFailure(
+      prepareImageJsonRequest(new Request(url, { method: "POST", body: raw })),
+      "Image",
+    )
+  })
+
+  test("rejects invalid JSON found while streaming a model-first body", async () => {
     const parsed = await prepareImageJsonRequest(
-      new Request(url, { method: "POST", body: raw }),
+      request(chunks('{"model":"gpt-image-2","image":"' + "A".repeat(100000))),
     )
-    expect(parsed.valid).toBe(false)
-    expect(new Uint8Array(await parsed.originalRequest.arrayBuffer())).toEqual(
-      raw,
-    )
+    await expectFailure(parsed.originalRequest.text(), "Image request body")
   })
 
   test("rejects duplicate top-level models before completing an upload", async () => {

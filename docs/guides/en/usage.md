@@ -37,7 +37,13 @@ xAI uses the upstream `usage.cost_in_usd_ticks` amount (`10^10` ticks = 1 USD), 
 
 Verbose logs include image response JSON metadata except `data` and streamed image base64. Edit request logs retain prompts, models, and parameters, replacing image base64 with placeholders; multipart files log only names, MIME types, and sizes.
 
-Image requests also include request IDs, total duration, completion/cancellation outcomes, and plugin lifecycle events. Image TTFT remains unset. JSON requests with an early `model` stream upstream, including model rewrites. Late models and xAI format conversion use temporary files for large bodies/strings, with a 512 MiB staging limit and automatic cleanup; verbose JSON logging observes the forwarding stream without buffering the full body.
+Image requests also include request IDs, total duration, and completion/cancellation outcomes in SQLite, without publishing gateway plugin events. Image TTFT remains unset. JSON requests with an early `model` stream upstream, including model rewrites. Late models and xAI format conversion use temporary files for large bodies/strings, with a 512 MiB staging limit and automatic cleanup; verbose JSON logging observes the forwarding stream without buffering the full body.
+
+### Video costs
+
+When an xAI video result query returns `status: "done"` with valid `usage.cost_in_usd_ticks`, the cost is saved in SQLite's `token_usage_events` under `videos_generations` and included in event, model, daily, and session summaries. The conversion is `10^10` ticks = 1 USD: `11300000000` ticks records 1.13 USD. Token fields remain zero when the upstream does not report tokens.
+
+SQLite deduplicates by provider, endpoint, and upstream task ID, so repeated queries and queries after a restart record the same task only once. Unfinished or failed jobs and results without a valid cost do not create cost events. With `--verbose`, the complete query response body is logged as `videos.result.response.body` in `videos-handler-YYYY-MM-DD.log`.
 
 ### Usage Viewer Screenshot
 

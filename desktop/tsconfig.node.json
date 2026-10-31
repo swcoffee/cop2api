@@ -35,6 +35,7 @@
     "../src/lib/provider-management.ts",
     "../src/lib/github-copilot-provider.ts",
     "../src/lib/internal-headers.ts",
+    "../src/lib/image-models.ts",
     "src/lib/provider-management-editor.ts",
     "src/lib/provider-management-auth.ts",
     "src/lib/media-upload.ts",

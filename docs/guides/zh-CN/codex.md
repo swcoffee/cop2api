@@ -12,6 +12,8 @@
 
 远程目录响应限制为 1 MiB JSON。合并后的目录超出该限制时，网关会优先保留通过 provider `agentsModels` 选中的模型，其余模型会被丢弃。请在 Provider 管理页选择需要的模型；如果需要完整列表，则生成本地目录文件。
 
+Codex 客户端目录始终排除仅输出图片的模型，即使 `agentsModels` 显式选择也不会展示；支持图片输入的聊天模型仍可按筛选规则展示。OpenCode 可以通过同一份名单发现仅输出图片的模型；普通聚合目录也包含图片模型，不受 `agentsModels` 限制。
+
 当 `modelMappings` 已将裸名 `model` 映射到同一个 `codex/model` 时，Codex 目录会省略重复的 `codex/model` 条目并保留裸名的完整元数据。默认的 `codex-auto-review` 和 `gpt-reserve` 映射也适用。显式前缀调用继续可用；映射到其他模型或 provider 时保留前缀条目。
 
 ### Codex `config.toml` 参考配置
@@ -80,6 +82,8 @@ enabled = false
 >
 > `GITHUB_COPILOT_API_KEY` 需设置为系统级用户环境变量，以便 Codex 应用也能读取。填写任一[网关 API Key](cli.md#auth-命令选项)；未配置 Key 时，填写任意非空占位值即可。未设置时，Codex 会报 `Missing environment variable` 错误。
 
+如果上游不支持加密多 Agent 消息，可在网关 `config.json` 或桌面端高级配置中开启 [`codexMultiAgentV1`](configuration.md#codex-多-agent-兼容性)。默认仍使用 V2。应用网关配置，刷新远程目录（或重新生成本地目录），然后**新建 Codex 会话**。运行中刷新目录不会切换会话已确定的版本，恢复旧会话会沿用已记录的版本；已有加密历史不会被转换。CLI 显式 feature 配置可能优先于已记录的版本和目录元数据。
+
 ### 自动审核模型映射
 
 通过顶层 GitHub Copilot 路由使用 `approvals_reviewer = "auto_review"` 时，在网关 `config.json` 中加入以下映射：
@@ -96,7 +100,7 @@ enabled = false
 
 ### 一键生成 `model_catalog.json`
 
-需要完整模型列表、使用 Codex `0.160.0` 之前的版本，或需要避开远程响应的 1 MiB 限制时，使用本地目录文件。生成脚本携带 `x-full-model-catalog: true`，绕过大小和默认模型排除限制，仍遵守 provider 启停状态及 `agentsModels` 名单；该 header 不会转发给上游。Provider 名单设置详见[配置说明](configuration.md)。
+需要完整模型列表、使用 Codex `0.160.0` 之前的版本，或需要避开远程响应的 1 MiB 限制时，使用本地目录文件。生成脚本携带 `x-full-model-catalog: true`，绕过大小和默认模型排除限制，仍遵守 provider 启停状态、`agentsModels` 名单和仅输出图片模型的过滤规则；该 header 不会转发给上游。Provider 名单设置详见[配置说明](configuration.md)。
 
 启动网关，安装 `curl` 及 Bun 或 Node.js，然后在仓库根目录运行[生成脚本](../../generate-model-catalog.sh)：
 
