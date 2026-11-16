@@ -1,8 +1,81 @@
 import type { ConfigFieldId, ConfigSection } from '../lib/config-fields'
 import en from './en'
 import zh from './zh'
+import type {
+  ClientErrorCode,
+  CodexClientOptions,
+} from '../../shared/client-integrations'
 
 export interface Locale {
+  clients: {
+    title: string
+    description: string
+    agent: string
+    gateway: string
+    apiKey: string
+    noAuth: string
+    keyNumber: string
+    refresh: string
+    loading: string
+    configure: string
+    update: string
+    working: string
+    open: string
+    restore: string
+    saved: string
+    restored: string
+    pluginFailed: string
+    pluginUninstallFailed: string
+    commandExit: string
+    stopped: string
+    model: string
+    fableModel: string
+    opusModel: string
+    sonnetModel: string
+    smallModel: string
+    reviewModel: string
+    clientDefault: string
+    sameModel: string
+    chooseModel: string
+    modelHint: string
+    claudeDescription: string
+    opencodeDescription: string
+    codexDescription: string
+    sandboxMode: string
+    sandboxModes: Record<CodexClientOptions['sandboxMode'], string>
+    approvalsReviewer: string
+    approvalReviewers: Record<CodexClientOptions['approvalsReviewer'], string>
+    webSearch: string
+    webSearchModes: Record<CodexClientOptions['webSearch'], string>
+    reasoningEffort: string
+    reasoningEffortHint: string
+    daemonAutoStart: string
+    defaultModeRequestUserInput: string
+    preventIdleSleep: string
+    modelSettings: string
+    permissionsSettings: string
+    searchSettings: string
+    featuresSettings: string
+    toolsSettings: string
+    pluginsSettings: string
+    connectionSettings: string
+    nativeToolSearch: string
+    agentInject: string
+    toolSearchBridge: string
+    agentContext: string
+    optionalPlugins: string
+    codexRestart: string
+    harnessDescription: string
+    harnessHint: string
+    profile: string
+    installPlugin: string
+    pluginInstalled: string
+    unconfigured: string
+    configured: string
+    outdated: string
+    error: string
+    errors: Record<ClientErrorCode, string>
+  }
   studio: {
     title: string
     description: string
