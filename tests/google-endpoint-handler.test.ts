@@ -35,6 +35,11 @@ const { GatewayPlugins } = await import("~/lib/plugins/gateway-plugins")
 const { messagesApiFlowDependencies } = await import(
   "~/routes/messages/api-flows"
 )
+const { webSearchFlowDependencies } = await import(
+  "~/routes/messages/web-search/fulfill"
+)
+const { encodeAntigravitySignatures, encodeAntigravityToolCallSignature } =
+  await import("~/routes/google/antigravity-signatures")
 const { googleHandlerDependencies, parseGoogleModelActionPath } = await import(
   "~/routes/google/handler"
 )
@@ -49,16 +54,28 @@ const originalHandleCompletionPayload =
   googleHandlerDependencies.handleCompletionPayload
 const originalGetAggregatedModels =
   googleHandlerDependencies.getAggregatedModels
+const originalGetMessageApiWebSearchModel =
+  googleHandlerDependencies.getMessageApiWebSearchModel
+const originalGetProviderConfig = googleHandlerDependencies.getProviderConfig
+const originalIsResponsesApiWebSearchEnabled =
+  googleHandlerDependencies.isResponsesApiWebSearchEnabled
 const originalResolveAlias =
   googleHandlerDependencies.resolveConfiguredProviderModelAlias
 const originalResolveProvider = googleHandlerDependencies.resolveProviderConfig
 const originalForwardGoogle =
   googleHandlerDependencies.forwardGoogleGenerateContent
+const originalWebSearchCreateResponses =
+  webSearchFlowDependencies.createResponses
+const originalWebSearchModelGetter =
+  webSearchFlowDependencies.getMessageApiWebSearchModel
+const originalWebSearchResolveProvider =
+  webSearchFlowDependencies.resolveProviderConfig
 const originalStateModels = state.models
 
 const createChatCompletions = mock(originalCreateChatCompletions)
 const createResponses = mock(originalCreateResponses)
 const DB_PATH_ENV = "COPILOT_API_SQLITE_DB_PATH"
+const antigravityHeaders = { "user-agent": "antigravity/cli/1.5.16" }
 
 async function* streamEvents(
   items: Array<ServerSentEventMessage>,
@@ -119,10 +136,20 @@ beforeEach(async () => {
   googleHandlerDependencies.handleCompletionPayload =
     originalHandleCompletionPayload
   googleHandlerDependencies.getAggregatedModels = originalGetAggregatedModels
+  googleHandlerDependencies.getMessageApiWebSearchModel =
+    originalGetMessageApiWebSearchModel
+  googleHandlerDependencies.getProviderConfig = originalGetProviderConfig
+  googleHandlerDependencies.isResponsesApiWebSearchEnabled =
+    originalIsResponsesApiWebSearchEnabled
   googleHandlerDependencies.resolveConfiguredProviderModelAlias =
     originalResolveAlias
   googleHandlerDependencies.resolveProviderConfig = originalResolveProvider
   googleHandlerDependencies.forwardGoogleGenerateContent = originalForwardGoogle
+  webSearchFlowDependencies.createResponses = originalWebSearchCreateResponses
+  webSearchFlowDependencies.getMessageApiWebSearchModel =
+    originalWebSearchModelGetter
+  webSearchFlowDependencies.resolveProviderConfig =
+    originalWebSearchResolveProvider
 })
 
 afterEach(async () => {
@@ -133,10 +160,20 @@ afterEach(async () => {
   googleHandlerDependencies.handleCompletionPayload =
     originalHandleCompletionPayload
   googleHandlerDependencies.getAggregatedModels = originalGetAggregatedModels
+  googleHandlerDependencies.getMessageApiWebSearchModel =
+    originalGetMessageApiWebSearchModel
+  googleHandlerDependencies.getProviderConfig = originalGetProviderConfig
+  googleHandlerDependencies.isResponsesApiWebSearchEnabled =
+    originalIsResponsesApiWebSearchEnabled
   googleHandlerDependencies.resolveConfiguredProviderModelAlias =
     originalResolveAlias
   googleHandlerDependencies.resolveProviderConfig = originalResolveProvider
   googleHandlerDependencies.forwardGoogleGenerateContent = originalForwardGoogle
+  webSearchFlowDependencies.createResponses = originalWebSearchCreateResponses
+  webSearchFlowDependencies.getMessageApiWebSearchModel =
+    originalWebSearchModelGetter
+  webSearchFlowDependencies.resolveProviderConfig =
+    originalWebSearchResolveProvider
   await closeUsageStore()
   Reflect.deleteProperty(process.env, DB_PATH_ENV)
 })
@@ -384,11 +421,14 @@ describe("Google Gemini /v1beta/models integration via Messages API", () => {
         name: "read_file",
         args: { path: "README.md" },
       },
-      thoughtSignature: opaqueToken,
+      thoughtSignature: encodeAntigravityToolCallSignature(
+        "call_read_1",
+        opaqueToken,
+      ),
     })
     expect(turn1Events[2]?.candidates?.[0]?.finishReason).toBe("STOP")
 
-    // Turn 2: Client sends back the functionCall + thoughtSignature + functionResponse
+    // Turn 2: Antigravity CLI replays functionCall + thoughtSignature + functionResponse without id fields
     createChatCompletions.mockImplementationOnce((payload) => {
       const assistantMsg = payload.messages.find((m) => m.role === "assistant")
       expect(assistantMsg?.reasoning_opaque).toBe(opaqueToken)
@@ -419,6 +459,13 @@ describe("Google Gemini /v1beta/models integration via Messages API", () => {
       })
     })
 
+    const replayedCallPart = {
+      functionCall: {
+        name: callPart!.functionCall!.name,
+        args: callPart!.functionCall!.args,
+      },
+      thoughtSignature: callPart!.thoughtSignature,
+    }
     const turn2Res = await app.request(
       "/v1beta/models/gemini-4-neon:generateContent",
       {
@@ -427,13 +474,12 @@ describe("Google Gemini /v1beta/models integration via Messages API", () => {
         body: JSON.stringify({
           contents: [
             { role: "user", parts: [{ text: "Read README.md" }] },
-            { role: "model", parts: [thoughtPart, callPart] },
+            { role: "model", parts: [thoughtPart, replayedCallPart] },
             {
               role: "user",
               parts: [
                 {
                   functionResponse: {
-                    id: "call_read_1",
                     name: "read_file",
                     response: { output: "# Copilot API" },
                   },
@@ -576,6 +622,322 @@ describe("Google Gemini /v1beta/models integration via Messages API", () => {
           ],
         },
       ],
+    })
+  })
+
+  test("lists models with multiple efforts as variants for every user agent", async () => {
+    const base = "gpt-5.4"
+    const getModels = mock(() =>
+      Promise.resolve([
+        { id: `${base}-high`, object: "model", display_name: "High preset" },
+        {
+          id: base,
+          object: "model",
+          display_name: "GPT-5.4",
+          reasoning_efforts: ["low", "medium", "high", "max", "ultra"],
+        },
+        {
+          id: `${base}-medium`,
+          object: "model",
+          display_name: "Medium preset",
+        },
+        { id: "fixed-model", object: "model", reasoning_efforts: ["high"] },
+      ]),
+    )
+    googleHandlerDependencies.getAggregatedModels = getModels
+    const handleCompletion = mock<typeof originalHandleCompletionPayload>(
+      (_c, payload) =>
+        Promise.resolve(
+          Response.json({
+            id: "msg_effort",
+            type: "message",
+            role: "assistant",
+            model: payload.model,
+            content: [{ type: "text", text: "OK" }],
+            stop_reason: "end_turn",
+            usage: { input_tokens: 2, output_tokens: 1 },
+          }),
+        ),
+    )
+    googleHandlerDependencies.handleCompletionPayload = handleCompletion
+    const app = createServer()
+
+    const response = await app.request("/v1beta/models")
+    const catalog = (await response.json()) as GoogleModelsResponse
+    expect(
+      catalog.models?.map(({ name, displayName }) => [name, displayName]),
+    ).toEqual([
+      [`models/${base}-medium`, "Medium preset"],
+      [`models/${base}-low`, "GPT-5.4 (Low)"],
+      [`models/${base}-high`, "High preset"],
+      [`models/${base}-max`, "GPT-5.4 (Max)"],
+      ["models/fixed-model", "fixed-model"],
+    ])
+    const agyResponse = await app.request("/v1beta/models", {
+      headers: antigravityHeaders,
+    })
+    expect(await agyResponse.json()).toEqual(catalog)
+
+    const makeRequest = (
+      model: string,
+      clientHeaders: Record<string, string> = {},
+    ) =>
+      app.request(`/v1beta/models/${model}:generateContent`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...clientHeaders },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: "hi" }] }],
+          generationConfig: {
+            thinkingConfig: { includeThoughts: false, thinkingBudget: 0 },
+          },
+        }),
+      })
+
+    expect((await makeRequest(`${base}-max`)).status).toBe(200)
+    expect(handleCompletion.mock.calls[0]?.[1]).toMatchObject({
+      model: base,
+      output_config: { effort: "max" },
+    })
+    expect(handleCompletion.mock.calls[0]?.[1].thinking).toBeUndefined()
+    expect((await makeRequest(`${base}-high`)).status).toBe(200)
+    expect(handleCompletion.mock.calls[1]?.[1].model).toBe(`${base}-high`)
+    const otherClient = await makeRequest(`${base}-max`, {
+      "user-agent": "google-genai/test",
+    })
+    expect(otherClient.status).toBe(200)
+    expect(handleCompletion.mock.calls[2]?.[1]).toMatchObject({
+      model: base,
+      output_config: { effort: "max" },
+    })
+    expect(getModels).toHaveBeenCalledTimes(2)
+
+    state.models = { object: "list", data: [] }
+    expect((await makeRequest(`${base}-low`)).status).toBe(200)
+    expect(handleCompletion.mock.calls[3]?.[1]).toMatchObject({
+      model: base,
+      output_config: { effort: "low" },
+    })
+    expect((await makeRequest(base)).status).toBe(200)
+    expect(handleCompletion.mock.calls[4]?.[1].model).toBe(base)
+    expect(getModels).toHaveBeenCalledTimes(3)
+  })
+
+  test("advertises media-capable models with aliases and resolves their original IDs", async () => {
+    const base = "codex/gpt-6.2-astra"
+    const alias = "codex/my-gemini-gpt-6.2-astra"
+    const provider: ResolvedProviderConfig = {
+      name: "codex",
+      type: "openai-responses",
+      baseUrl: "https://example.com",
+      authType: "authorization",
+      apiKey: "upstream-key",
+      models: {
+        "no-pdf": { supportPdf: false },
+      },
+    }
+    googleHandlerDependencies.getProviderConfig = mock((name) =>
+      name === provider.name ? provider : null,
+    )
+    const imageModel = { object: "model", input_modalities: ["text", "image"] }
+    const textModel = { object: "model", input_modalities: ["text"] }
+    const getModels = mock(() =>
+      Promise.resolve([
+        {
+          ...imageModel,
+          id: base,
+          display_name: "GPT-6.2 Astra (codex)",
+          reasoning_efforts: ["low", "medium", "max"],
+        },
+        { ...imageModel, id: `${base}-low` },
+        {
+          ...imageModel,
+          id: "document-model",
+          capabilities: {
+            limits: { vision: { supported_media_types: ["application/pdf"] } },
+          },
+        },
+        { ...imageModel, id: "codex/no-pdf" },
+        { ...textModel, id: "codex/text-only" },
+        { ...imageModel, id: "codex/reserved" },
+        { ...textModel, id: "codex/my-gemini-reserved" },
+        {
+          ...imageModel,
+          id: "codex/mixed",
+          reasoning_efforts: ["low", "high"],
+        },
+        { ...textModel, id: "codex/mixed-high" },
+        { ...imageModel, id: "codex/organic-low" },
+        {
+          ...imageModel,
+          id: "codex/my-gemini-organic",
+          reasoning_efforts: ["low", "high"],
+        },
+      ]),
+    )
+    googleHandlerDependencies.getAggregatedModels = getModels
+    const handleCompletion = mock<typeof originalHandleCompletionPayload>(
+      (_c, payload) =>
+        Promise.resolve(
+          Response.json({
+            id: "msg_alias",
+            type: "message",
+            role: "assistant",
+            model: payload.model,
+            content: [{ type: "text", text: "OK" }],
+            stop_reason: "end_turn",
+            usage: { input_tokens: 2, output_tokens: 1 },
+          }),
+        ),
+    )
+    googleHandlerDependencies.handleCompletionPayload = handleCompletion
+    const app = createServer()
+    const generate = (model: string, action = "generateContent") =>
+      app.request(`/v1beta/models/${model}:${action}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: "hi" }] }],
+          generationConfig: { thinkingConfig: { thinkingBudget: 0 } },
+        }),
+      })
+
+    state.models = { object: "list", data: [] }
+    expect((await generate(`${alias}-max`)).status).toBe(200)
+    expect(handleCompletion.mock.calls[0]?.[1]).toMatchObject({
+      model: base,
+      output_config: { effort: "max" },
+    })
+    expect(getModels).toHaveBeenCalledTimes(1)
+
+    const response = await app.request("/v1beta/models")
+    expect(response.status).toBe(200)
+    const { models } = (await response.json()) as GoogleModelsResponse
+    expect(models?.map(({ name }) => name)).toEqual([
+      `models/${alias}-medium`,
+      `models/${alias}-low`,
+      `models/${alias}-max`,
+      "models/my-gemini-document-model",
+      "models/codex/no-pdf",
+      "models/codex/text-only",
+      "models/codex/reserved",
+      "models/codex/my-gemini-reserved",
+      "models/codex/mixed-low",
+      "models/codex/mixed-high",
+      "models/codex/organic-low",
+      "models/codex/my-gemini-organic-low",
+      "models/codex/my-gemini-organic-high",
+    ])
+    expect(models?.[0]?.displayName).toBe("GPT-6.2 Astra (codex) (Medium)")
+    expect(models?.[3]?.displayName).toBe("document-model")
+
+    expect((await generate(alias, "streamGenerateContent")).status).toBe(200)
+    expect(handleCompletion.mock.calls[1]?.[1].model).toBe(base)
+    expect((await generate(`${base}-max`)).status).toBe(200)
+    expect(handleCompletion.mock.calls[2]?.[1]).toMatchObject({
+      model: base,
+      output_config: { effort: "max" },
+    })
+    expect((await generate("my-gemini-document-model")).status).toBe(200)
+    expect(handleCompletion.mock.calls[3]?.[1].model).toBe("document-model")
+    expect((await generate("codex/my-gemini-reserved")).status).toBe(200)
+    expect(handleCompletion.mock.calls[4]?.[1].model).toBe(
+      "codex/my-gemini-reserved",
+    )
+    expect(getModels).toHaveBeenCalledTimes(2)
+
+    provider.agentsModels = ["gpt-6.2-astra"]
+    const selected = await app.request("/v1beta/models", {
+      headers: antigravityHeaders,
+    })
+    const selectedCatalog = (await selected.json()) as GoogleModelsResponse
+    expect(selectedCatalog.models?.map(({ name }) => name)).toEqual([
+      `models/${alias}-medium`,
+      `models/${alias}-max`,
+      "models/my-gemini-document-model",
+    ])
+    expect((await generate(`${alias}-low`)).status).toBe(200)
+    expect(handleCompletion.mock.calls[5]?.[1].model).toBe(`${base}-low`)
+
+    provider.agentsModels = []
+    const hidden = await app.request("/v1beta/models")
+    const hiddenCatalog = (await hidden.json()) as GoogleModelsResponse
+    expect(hiddenCatalog.models?.map(({ name }) => name)).toEqual([
+      "models/my-gemini-document-model",
+    ])
+    expect((await generate(`${alias}-max`)).status).toBe(200)
+    expect(handleCompletion.mock.calls[6]?.[1]).toMatchObject({
+      model: base,
+      output_config: { effort: "max" },
+    })
+  })
+
+  test("forwards the selected Antigravity level to a native Google model", async () => {
+    const provider: ResolvedProviderConfig = {
+      name: "mygoogle",
+      type: "google",
+      baseUrl: "https://generativelanguage.googleapis.com",
+      authType: "x-goog-api-key",
+      apiKey: "upstream-key",
+    }
+    const base = "mygoogle/gemini-4-neon"
+    googleHandlerDependencies.getProviderConfig = mock(() => provider)
+    googleHandlerDependencies.getAggregatedModels = mock(() =>
+      Promise.resolve([
+        { id: base, object: "model", display_name: "Gemini 4 Neon" },
+        {
+          id: "mygoogle/gemini-4-argon",
+          object: "model",
+          display_name: "Gemini 4 Argon",
+        },
+      ]),
+    )
+    const resolveAlias = mock<typeof originalResolveAlias>(() =>
+      Promise.resolve({ provider: provider.name, model: "gemini-4-neon" }),
+    )
+    googleHandlerDependencies.resolveConfiguredProviderModelAlias = resolveAlias
+    googleHandlerDependencies.resolveProviderConfig = mock(() =>
+      Promise.resolve(provider),
+    )
+    const forward = mock<typeof originalForwardGoogle>(() =>
+      Promise.resolve(
+        Response.json({ candidates: [{ finishReason: "STOP" }] }),
+      ),
+    )
+    googleHandlerDependencies.forwardGoogleGenerateContent = forward
+    const app = createServer()
+    const response = await app.request("/v1beta/models", {
+      headers: antigravityHeaders,
+    })
+    const catalog = (await response.json()) as GoogleModelsResponse
+    expect(catalog.models?.map((model) => model.name)).toEqual([
+      `models/${base}-medium`,
+      `models/${base}-low`,
+      `models/${base}-high`,
+      `models/${base}-xhigh`,
+      "models/mygoogle/gemini-4-argon-medium",
+      "models/mygoogle/gemini-4-argon-low",
+      "models/mygoogle/gemini-4-argon-high",
+    ])
+    const generation = await app.request(
+      `/v1beta/models/${base}-xhigh:generateContent`,
+      {
+        method: "POST",
+        headers: { ...antigravityHeaders, "content-type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: "hi" }] }],
+          generationConfig: {
+            temperature: 0.7,
+            thinkingConfig: { includeThoughts: true, thinkingBudget: 1024 },
+          },
+        }),
+      },
+    )
+    expect(generation.status).toBe(200)
+    expect(resolveAlias.mock.calls[0]?.[0]).toBe(base)
+    expect(forward.mock.calls[0]?.[1]).toBe("gemini-4-neon")
+    expect(forward.mock.calls[0]?.[2].generationConfig).toEqual({
+      temperature: 0.7,
+      thinkingConfig: { includeThoughts: true, thinkingLevel: "XHIGH" },
     })
   })
 
@@ -1959,7 +2321,10 @@ describe("Google Gemini /v1beta/models integration via Messages API", () => {
       if (text) {
         merged.push({ text, thoughtSignature: signatures[0]?.thoughtSignature })
       }
-      if (toolPart) merged.push(toolPart)
+      if (toolPart?.functionCall) {
+        const { id: _strippedId, ...functionCall } = toolPart.functionCall
+        merged.push({ ...toolPart, functionCall })
+      }
       const followUp =
         end === "tool" ?
           { functionResponse: { name: tool.name, response: { output: "OK" } } }
@@ -2266,4 +2631,584 @@ describe("Google Gemini /v1beta/models integration via Messages API", () => {
       ])
     },
   )
+
+  test("preserves original parallel Responses tool call IDs when Antigravity CLI strips id on replay", async () => {
+    const model = "gpt-5.4"
+    state.models = {
+      object: "list",
+      data: [
+        {
+          id: model,
+          name: model,
+          object: "model",
+          preview: false,
+          vendor: "openai",
+          version: "1",
+          model_picker_enabled: true,
+          supported_endpoints: ["/responses"],
+          capabilities: {
+            family: "gpt",
+            limits: { max_output_tokens: 16384 },
+            object: "model_capabilities",
+            supports: {},
+            tokenizer: "o200k_base",
+            type: "chat",
+          },
+        },
+      ],
+    }
+
+    const reasoning: ResponseOutputReasoning = {
+      id: "rs_parallel_1",
+      type: "reasoning",
+      encrypted_content: "cipher-parallel-1",
+      summary: [{ type: "summary_text", text: "Reading two files." }],
+    }
+    const tool1: ResponseOutputFunctionCall = {
+      id: "fc_parallel_1",
+      type: "function_call",
+      call_id: "call_f04518a904314f7ca40b1d265bec1575",
+      name: "read_file",
+      arguments: '{"path":"a.ts"}',
+      status: "completed",
+    }
+    const tool2: ResponseOutputFunctionCall = {
+      id: "fc_parallel_2",
+      type: "function_call",
+      call_id: "call_98b2c4d6e8f0123456789abcdef01234",
+      name: "read_file",
+      arguments: '{"path":"b.ts"}',
+      status: "completed",
+    }
+    const result = createResponsesResult(model)
+    const upstream: Array<ResponseStreamEvent> = [
+      {
+        type: "response.created",
+        sequence_number: 0,
+        response: { ...result, status: "in_progress" },
+      },
+      {
+        type: "response.reasoning_summary_text.delta",
+        sequence_number: 1,
+        output_index: 0,
+        item_id: reasoning.id,
+        summary_index: 0,
+        delta: "Reading two files.",
+      },
+      {
+        type: "response.output_item.done",
+        sequence_number: 2,
+        output_index: 0,
+        item: reasoning,
+      },
+      {
+        type: "response.output_item.added",
+        sequence_number: 3,
+        output_index: 1,
+        item: { ...tool1, status: "in_progress" },
+      },
+      {
+        type: "response.output_item.done",
+        sequence_number: 4,
+        output_index: 1,
+        item: tool1,
+      },
+      {
+        type: "response.output_item.added",
+        sequence_number: 5,
+        output_index: 2,
+        item: { ...tool2, status: "in_progress" },
+      },
+      {
+        type: "response.output_item.done",
+        sequence_number: 6,
+        output_index: 2,
+        item: tool2,
+      },
+      {
+        type: "response.completed",
+        sequence_number: 7,
+        response: { ...result, output: [reasoning, tool1, tool2] },
+      },
+    ]
+
+    createResponses.mockImplementationOnce(() =>
+      Promise.resolve(
+        streamEvents(
+          upstream.map((event) => ({ data: JSON.stringify(event) })),
+        ),
+      ),
+    )
+    createResponses.mockResolvedValueOnce(result)
+
+    const app = createServer()
+    const headers = {
+      "content-type": "application/json",
+      "user-agent":
+        "antigravity/cli/1.5.17 (aidev_client; auth_method=gateway)",
+    }
+    const initial = { role: "user", parts: [{ text: "Read both files" }] }
+    const turn1 = await app.request(
+      `/v1beta/models/${model}:streamGenerateContent?alt=sse`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ contents: [initial] }),
+      },
+    )
+    expect(turn1.status).toBe(200)
+    const parts = parseSseDataEvents(await turn1.text()).flatMap(
+      (chunk) => chunk.candidates?.[0]?.content?.parts ?? [],
+    )
+    const toolParts = parts.filter((part) => part.functionCall)
+    expect(toolParts).toHaveLength(2)
+    expect(toolParts.every((part) => Boolean(part.thoughtSignature))).toBe(true)
+
+    // Replay exactly like Antigravity CLI: strip functionCall.id and functionResponse.id
+    const replayedModelParts: Array<GooglePart> = toolParts.map((part) => ({
+      functionCall: {
+        name: part.functionCall!.name,
+        args: part.functionCall!.args,
+      },
+      thoughtSignature: part.thoughtSignature,
+    }))
+    const turn2 = await app.request(`/v1beta/models/${model}:generateContent`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        contents: [
+          initial,
+          { role: "model", parts: replayedModelParts },
+          {
+            role: "user",
+            parts: [
+              {
+                functionResponse: {
+                  name: "read_file",
+                  response: { output: "file A" },
+                },
+              },
+              {
+                functionResponse: {
+                  name: "read_file",
+                  response: { output: "file B" },
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    })
+    expect(turn2.status).toBe(200)
+
+    const input = createResponses.mock.calls[1]?.[0]?.input
+    expect(Array.isArray(input)).toBe(true)
+    expect((input as Array<ResponseInputItem>).slice(1, 6)).toMatchObject([
+      reasoning,
+      { type: "function_call", name: "read_file", call_id: tool1.call_id },
+      { type: "function_call", name: "read_file", call_id: tool2.call_id },
+      {
+        type: "function_call_output",
+        call_id: tool1.call_id,
+        output: "file A",
+      },
+      {
+        type: "function_call_output",
+        call_id: tool2.call_id,
+        output: "file B",
+      },
+    ])
+  })
+
+  test("strips gateway Antigravity thoughtSignature envelopes before native Google passthrough", async () => {
+    const provider: ResolvedProviderConfig = {
+      name: "mygoogle",
+      type: "google",
+      baseUrl: "https://generativelanguage.googleapis.com",
+      apiKey: "google-test-key",
+      authType: "x-goog-api-key",
+    }
+    googleHandlerDependencies.resolveConfiguredProviderModelAlias = mock(() =>
+      Promise.resolve({ provider: provider.name, model: "gemini-2.5-pro" }),
+    )
+    googleHandlerDependencies.resolveProviderConfig = mock(() =>
+      Promise.resolve(provider),
+    )
+    const forward = mock<typeof originalForwardGoogle>(() =>
+      Promise.resolve(
+        Response.json({
+          candidates: [
+            {
+              index: 0,
+              content: { role: "model", parts: [{ text: "ok" }] },
+              finishReason: "STOP",
+            },
+          ],
+        }),
+      ),
+    )
+    googleHandlerDependencies.forwardGoogleGenerateContent = forward
+
+    const nativeSig = Buffer.from("native-google-signature").toString("base64")
+    const agyTextSig = encodeAntigravitySignatures([["enc_1@rs_1", 4, 0]])
+    const agyCallSig = encodeAntigravityToolCallSignature("call_1234")
+
+    const app = createServer()
+    const res = await app.request(
+      "/v1beta/models/mygoogle/gemini-2.5-pro:generateContent",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "user-agent":
+            "antigravity/cli/1.5.17 (aidev_client; auth_method=gateway)",
+        },
+        body: JSON.stringify({
+          contents: [
+            { role: "user", parts: [{ text: "Start" }] },
+            {
+              role: "model",
+              parts: [
+                { text: "Done", thoughtSignature: agyTextSig },
+                { text: "", thoughtSignature: agyTextSig },
+                {
+                  functionCall: { name: "read_file", args: { path: "a.ts" } },
+                  thoughtSignature: agyCallSig,
+                },
+                { text: "Native", thoughtSignature: nativeSig },
+              ],
+            },
+            {
+              role: "user",
+              parts: [
+                {
+                  functionResponse: {
+                    name: "read_file",
+                    response: { output: "content" },
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+      },
+    )
+
+    expect(res.status).toBe(200)
+    expect(forward).toHaveBeenCalledTimes(1)
+    expect(forward.mock.calls[0]?.[2].contents?.[1]).toEqual({
+      role: "model",
+      parts: [
+        { text: "Done" },
+        { functionCall: { name: "read_file", args: { path: "a.ts" } } },
+        { text: "Native", thoughtSignature: nativeSig },
+      ],
+    })
+  })
+
+  test("routes googleSearch-only generateContent through Copilot Responses web search and returns groundingMetadata", async () => {
+    googleHandlerDependencies.getMessageApiWebSearchModel = () => "gpt-6-luna"
+    googleHandlerDependencies.isResponsesApiWebSearchEnabled = () => true
+    webSearchFlowDependencies.getMessageApiWebSearchModel = () => "gpt-6-luna"
+    const wsResponses = mock<typeof originalWebSearchCreateResponses>(() =>
+      Promise.resolve({
+        ...createResponsesResult("gpt-6-luna"),
+        id: "resp_google_search_1",
+        output: [
+          {
+            type: "web_search_call",
+            action: {
+              query: "Python 3.14 release notes site:docs.python.org",
+            },
+          } as unknown as NonNullable<
+            ReturnType<typeof createResponsesResult>["output"]
+          >[number],
+          {
+            type: "message",
+            id: "msg_ws_1",
+            role: "assistant",
+            status: "completed",
+            content: [
+              {
+                type: "output_text",
+                text: "Python 3.14 adds template string literals and deferred annotations.",
+                annotations: [
+                  {
+                    type: "url_citation",
+                    url: "https://docs.python.org/3.14/whatsnew/3.14.html",
+                    title: "What's New In Python 3.14",
+                  },
+                ],
+              },
+            ],
+          } as unknown as NonNullable<
+            ReturnType<typeof createResponsesResult>["output"]
+          >[number],
+        ],
+        usage: { input_tokens: 30, output_tokens: 20, total_tokens: 50 },
+      }),
+    )
+    webSearchFlowDependencies.createResponses = wsResponses
+
+    const app = createServer()
+    const response = await app.request(
+      "/v1beta/models/gemini-3.8-flash:generateContent",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...antigravityHeaders,
+        },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [
+                { text: "Python 3.14 release notes site:docs.python.org" },
+              ],
+            },
+          ],
+          tools: [
+            {
+              googleSearch: {
+                enhancedContent: { imageSearch: { maxResultCount: 5 } },
+              },
+            },
+          ],
+        }),
+      },
+    )
+
+    expect(response.status).toBe(200)
+    expect(wsResponses).toHaveBeenCalledTimes(1)
+    expect(wsResponses.mock.calls[0]?.[0]).toMatchObject({
+      model: "gpt-6-luna",
+      tools: [{ type: "web_search", search_context_size: "low" }],
+    })
+
+    const body = (await response.json()) as GoogleGenerateContentResponse
+    expect(body.candidates?.[0]).toEqual({
+      index: 0,
+      content: {
+        role: "model",
+        parts: [
+          {
+            text: "Python 3.14 adds template string literals and deferred annotations.",
+          },
+        ],
+      },
+      finishReason: "STOP",
+      groundingMetadata: {
+        webSearchQueries: ["Python 3.14 release notes site:docs.python.org"],
+        groundingChunks: [
+          {
+            web: {
+              uri: "https://docs.python.org/3.14/whatsnew/3.14.html",
+              title: "What's New In Python 3.14",
+            },
+          },
+        ],
+      },
+    })
+  })
+
+  test("streams googleSearch-only streamGenerateContent?alt=sse with groundingMetadata on the final chunk", async () => {
+    googleHandlerDependencies.getMessageApiWebSearchModel = () => "gpt-6-luna"
+    googleHandlerDependencies.isResponsesApiWebSearchEnabled = () => true
+    webSearchFlowDependencies.getMessageApiWebSearchModel = () => "gpt-6-luna"
+    webSearchFlowDependencies.createResponses = mock<
+      typeof originalWebSearchCreateResponses
+    >(() =>
+      Promise.resolve({
+        ...createResponsesResult("gpt-6-luna"),
+        id: "resp_google_search_sse",
+        output: [
+          {
+            type: "web_search_call",
+            action: { query: "bun latest release" },
+          } as unknown as NonNullable<
+            ReturnType<typeof createResponsesResult>["output"]
+          >[number],
+          {
+            type: "message",
+            id: "msg_ws_sse",
+            role: "assistant",
+            status: "completed",
+            content: [
+              {
+                type: "output_text",
+                text: "Bun 1.4 is available.",
+                annotations: [
+                  {
+                    type: "url_citation",
+                    url: "https://bun.sh/blog",
+                    title: "Bun Blog",
+                  },
+                ],
+              },
+            ],
+          } as unknown as NonNullable<
+            ReturnType<typeof createResponsesResult>["output"]
+          >[number],
+        ],
+        usage: { input_tokens: 10, output_tokens: 8, total_tokens: 18 },
+      }),
+    )
+
+    const app = createServer()
+    const response = await app.request(
+      "/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: "bun latest release" }] }],
+          tools: [{ googleSearch: {} }],
+        }),
+      },
+    )
+
+    expect(response.status).toBe(200)
+    const chunks = parseSseDataEvents(await response.text())
+    const combinedText = chunks
+      .flatMap((chunk) => chunk.candidates?.[0]?.content?.parts ?? [])
+      .map((part) => part.text ?? "")
+      .join("")
+    expect(combinedText).toBe("Bun 1.4 is available.")
+    const finalChunk = chunks.at(-1)
+    expect(finalChunk?.candidates?.[0]?.finishReason).toBe("STOP")
+    expect(finalChunk?.candidates?.[0]?.groundingMetadata).toEqual({
+      webSearchQueries: ["bun latest release"],
+      groundingChunks: [
+        { web: { uri: "https://bun.sh/blog", title: "Bun Blog" } },
+      ],
+    })
+  })
+
+  test("returns 400 when googleSearch is requested without gateway web search configured or enabled", async () => {
+    const completionSpy = mock(originalHandleCompletionPayload)
+    googleHandlerDependencies.handleCompletionPayload = completionSpy
+    const app = createServer()
+
+    const sendSearchRequest = () =>
+      app.request("/v1beta/models/gemini-3.8-flash:generateContent", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: "hello" }] }],
+          tools: [{ googleSearch: {} }],
+        }),
+      })
+
+    // 1. messageApiWebSearchModel unset
+    googleHandlerDependencies.getMessageApiWebSearchModel = () => undefined
+    googleHandlerDependencies.isResponsesApiWebSearchEnabled = () => true
+    const unsetRes = await sendSearchRequest()
+    expect(unsetRes.status).toBe(400)
+    const unsetBody = (await unsetRes.json()) as GoogleGenerateContentResponse
+    expect(unsetBody.error?.code).toBe(400)
+    expect(unsetBody.error?.message).toContain("messageApiWebSearchModel")
+
+    // 2. useResponsesApiWebSearch disabled for a Copilot model
+    googleHandlerDependencies.getMessageApiWebSearchModel = () => "gpt-6-luna"
+    googleHandlerDependencies.isResponsesApiWebSearchEnabled = () => false
+    const disabledRes = await sendSearchRequest()
+    expect(disabledRes.status).toBe(400)
+    const disabledBody =
+      (await disabledRes.json()) as GoogleGenerateContentResponse
+    expect(disabledBody.error?.message).toContain("useResponsesApiWebSearch")
+
+    // 3. provider/model alias does not match an enabled provider
+    googleHandlerDependencies.getMessageApiWebSearchModel = () =>
+      "missing-provider/search-model"
+    googleHandlerDependencies.isResponsesApiWebSearchEnabled = () => true
+    googleHandlerDependencies.resolveProviderConfig = () =>
+      Promise.resolve(null)
+    const missingRes = await sendSearchRequest()
+    expect(missingRes.status).toBe(400)
+    const missingBody =
+      (await missingRes.json()) as GoogleGenerateContentResponse
+    expect(missingBody.error?.message).toContain(
+      "missing-provider/search-model",
+    )
+
+    // 4. provider/model alias uses openai-compatible (no server-side web search)
+    googleHandlerDependencies.getMessageApiWebSearchModel = () =>
+      "compat/search-model"
+    googleHandlerDependencies.resolveProviderConfig = (provider) =>
+      Promise.resolve(
+        provider === "compat" ?
+          ({
+            name: "compat",
+            type: "openai-compatible",
+            baseUrl: "https://compat.example/v1",
+            apiKey: "test-key",
+            authType: "authorization",
+            models: {},
+          } satisfies ResolvedProviderConfig)
+        : null,
+      )
+    const compatRes = await sendSearchRequest()
+    expect(compatRes.status).toBe(400)
+    const compatBody = (await compatRes.json()) as GoogleGenerateContentResponse
+    expect(compatBody.error?.message).toContain("openai-compatible")
+
+    expect(completionSpy).not.toHaveBeenCalled()
+  })
+
+  test("passes googleSearch-only request natively when messageApiWebSearchModel targets a Google provider", async () => {
+    const googleWebSearchProvider: ResolvedProviderConfig = {
+      name: "gemini-search",
+      type: "google",
+      baseUrl: "https://generativelanguage.googleapis.com",
+      apiKey: "test-google-key",
+      authType: "x-goog-api-key",
+      models: {},
+    }
+    googleHandlerDependencies.getMessageApiWebSearchModel = () =>
+      "gemini-search/gemini-2.5-flash"
+    googleHandlerDependencies.resolveProviderConfig = (provider) =>
+      Promise.resolve(
+        provider === "gemini-search" ? googleWebSearchProvider : null,
+      )
+    const forward = mock<typeof originalForwardGoogle>(() =>
+      Promise.resolve(
+        Response.json({
+          candidates: [
+            {
+              index: 0,
+              content: { role: "model", parts: [{ text: "native result" }] },
+              finishReason: "STOP",
+              groundingMetadata: { webSearchQueries: ["native query"] },
+            },
+          ],
+        }),
+      ),
+    )
+    googleHandlerDependencies.forwardGoogleGenerateContent = forward
+
+    const app = createServer()
+    const response = await app.request(
+      "/v1beta/models/gemini-3.8-flash:generateContent",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: "native query" }] }],
+          tools: [{ googleSearch: {} }],
+        }),
+      },
+    )
+
+    expect(response.status).toBe(200)
+    expect(forward).toHaveBeenCalledTimes(1)
+    expect(forward.mock.calls[0]?.[1]).toBe("gemini-2.5-flash")
+    expect(forward.mock.calls[0]?.[2].tools).toEqual([{ googleSearch: {} }])
+    const body = (await response.json()) as GoogleGenerateContentResponse
+    expect(body.candidates?.[0]?.content?.parts).toEqual([
+      { text: "native result" },
+    ])
+    expect(body.candidates?.[0]?.groundingMetadata).toEqual({
+      webSearchQueries: ["native query"],
+    })
+  })
 })

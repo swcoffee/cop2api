@@ -3,8 +3,13 @@ import type { Context } from "hono"
 import { streamSSE } from "hono/streaming"
 import type { ContentfulStatusCode } from "hono/utils/http-status"
 
+import { parseProviderModelAlias } from "~/lib/catalog/provider-model"
 import { isAntigravityUserAgent } from "~/lib/cli/antigravity"
 import {
+  getConfig,
+  getMessageApiWebSearchModel,
+  getProviderConfig,
+  isResponsesApiWebSearchEnabled,
   resolveMappedModel,
   resolveProviderConfigForModel,
   type ModelConfig,
@@ -22,6 +27,7 @@ import {
   resolveConfiguredProviderModelAlias,
   resolveProviderConfig,
 } from "~/lib/providers/provider-resolver"
+import { state } from "~/lib/state"
 import {
   createProviderTokenUsageRecorder,
   normalizeAnthropicUsage,
@@ -36,6 +42,10 @@ import type {
 import { translateGoogleUsage } from "~/routes/messages/google-translation"
 import { handleCompletionPayload } from "~/routes/messages/handler"
 import {
+  isWebSearchOnlyRequest,
+  resolveWebSearchRoute,
+} from "~/routes/messages/web-search/fulfill"
+import {
   getAggregatedModels,
   type ClientModel,
 } from "~/routes/models/model-discovery"
@@ -43,6 +53,12 @@ import { applyMissingExtraBody } from "~/routes/provider/utils"
 import { forwardGoogleGenerateContent } from "~/services/providers/google"
 import { resolveOpencodeMessagesSession } from "~/services/providers/provider-proxy"
 
+import {
+  applyAntigravityModelEffort,
+  createAntigravityModelCatalog,
+  mayUseAntigravityModelAlias,
+} from "./antigravity-models"
+import { stripAntigravitySignatures } from "./antigravity-signatures"
 import { translateMessagesStreamToGoogle } from "./messages-stream-translation"
 import {
   createGoogleErrorPayload,
@@ -59,7 +75,10 @@ const SESSION_UUID_PATTERN = /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/iu
 export const googleHandlerDependencies = {
   forwardGoogleGenerateContent,
   getAggregatedModels,
+  getMessageApiWebSearchModel,
+  getProviderConfig,
   handleCompletionPayload,
+  isResponsesApiWebSearchEnabled,
   resolveConfiguredProviderModelAlias,
   resolveProviderConfig,
 }
@@ -137,15 +156,51 @@ function toGoogleModelEntry(
   }
 }
 
-export async function handleGoogleModelsList(c: Context): Promise<Response> {
+type ModelAliases = Pick<
+  ReturnType<typeof createAntigravityModelCatalog>,
+  "mediaAliases" | "variants"
+>
+
+let modelAliasCatalog:
+  | {
+      config: ReturnType<typeof getConfig>
+      copilotModels: typeof state.models
+      aliases: ModelAliases
+    }
+  | undefined
+
+async function refreshModelAliasCatalog(c: Context) {
+  const config = getConfig()
+  const copilotModels = state.models
   const models = await googleHandlerDependencies.getAggregatedModels(
     stripInternalRequestHeaders(c.req.raw.headers),
     { includeImageModels: false },
   )
+  const { entries, ...aliases } = createAntigravityModelCatalog(
+    models,
+    googleHandlerDependencies.getProviderConfig,
+  )
+  modelAliasCatalog = { config, copilotModels, aliases }
+  return { entries, ...aliases }
+}
+
+export async function handleGoogleModelsList(c: Context): Promise<Response> {
+  const { entries } = await refreshModelAliasCatalog(c)
   const response: GoogleModelsResponse = {
-    models: models.map(toGoogleModelEntry),
+    models: entries.map(toGoogleModelEntry),
   }
   return c.json(response)
+}
+
+async function getModelAliases(c: Context): Promise<ModelAliases> {
+  const catalog = modelAliasCatalog
+  if (
+    catalog?.config === getConfig()
+    && catalog.copilotModels === state.models
+  ) {
+    return catalog.aliases
+  }
+  return refreshModelAliasCatalog(c)
 }
 
 function readSessionLabel(value: unknown): string | undefined {
@@ -215,12 +270,26 @@ export async function handleGoogleGenerateContent(
     applyAntigravitySessionLabels(requestBody?.labels)
     setPluginRequestModel(parsedPath.model)
 
-    const mappedModel = resolveMappedModel(parsedPath.model)
+    let mappedModel = resolveMappedModel(parsedPath.model)
+    if (
+      mappedModel === parsedPath.model
+      && mayUseAntigravityModelAlias(parsedPath.model)
+    ) {
+      const { mediaAliases, variants } = await getModelAliases(c)
+      const model = mediaAliases.get(parsedPath.model) ?? parsedPath.model
+      mappedModel = resolveMappedModel(model)
+      const variant = mappedModel === model ? variants.get(model) : undefined
+      if (variant) {
+        mappedModel = resolveMappedModel(variant.model)
+        applyAntigravityModelEffort(requestBody, variant.effort)
+      }
+    }
     debugJson(logger, "Google generateContent request:", {
       action: parsedPath.action,
       mappedModel,
       model: parsedPath.model,
       useSSE,
+      requestBody,
     })
 
     const providerAlias =
@@ -256,6 +325,59 @@ export async function handleGoogleGenerateContent(
     })
     debugJson(logger, "Translated Messages payload:", messagesPayload)
 
+    if (isWebSearchOnlyRequest(messagesPayload)) {
+      const webSearchModel =
+        googleHandlerDependencies.getMessageApiWebSearchModel()
+      const responsesWebSearchEnabled =
+        googleHandlerDependencies.isResponsesApiWebSearchEnabled()
+      const webSearchRoute = await resolveWebSearchRoute(messagesPayload, {
+        webSearchModel,
+        responsesWebSearchEnabled,
+        resolveProviderConfig: googleHandlerDependencies.resolveProviderConfig,
+      })
+
+      if (webSearchRoute.kind === "strip") {
+        return c.json(
+          createGoogleErrorPayload(
+            400,
+            buildGoogleWebSearchUnavailableMessage(webSearchModel),
+          ),
+          400,
+        )
+      }
+
+      if (webSearchRoute.kind === "provider") {
+        const configuredWebSearchProvider =
+          await googleHandlerDependencies.resolveProviderConfig(
+            webSearchRoute.alias.provider,
+          )
+        const webSearchProviderConfig =
+          configuredWebSearchProvider
+          && resolveProviderConfigForModel(
+            configuredWebSearchProvider,
+            webSearchRoute.alias.model,
+          )
+        if (webSearchProviderConfig?.type === "google") {
+          return await handleNativeGoogleProviderPassthrough(c, {
+            model: webSearchRoute.alias.model,
+            payload: requestBody,
+            providerConfig: webSearchProviderConfig,
+            stream,
+            useSSE,
+          })
+        }
+        if (webSearchProviderConfig?.type === "openai-compatible") {
+          return c.json(
+            createGoogleErrorPayload(
+              400,
+              `Google Search is not supported by 'messageApiWebSearchModel' ('${webSearchModel}') because provider '${webSearchRoute.alias.provider}' uses type 'openai-compatible'.`,
+            ),
+            400,
+          )
+        }
+      }
+    }
+
     const messagesResponse =
       await googleHandlerDependencies.handleCompletionPayload(
         c,
@@ -264,7 +386,6 @@ export async function handleGoogleGenerateContent(
           forwardStructuredOutput: true,
           skipClaudeAutoModel: true,
           skipModelMapping: true,
-          skipWebSearch: true,
           usageEndpoint: "generate_content",
         },
       )
@@ -333,6 +454,18 @@ export async function handleGoogleGenerateContent(
     }
     throw error
   }
+}
+
+function buildGoogleWebSearchUnavailableMessage(
+  webSearchModel: string | undefined,
+): string {
+  if (!webSearchModel) {
+    return "Google Search is not configured on this gateway. Configure 'messageApiWebSearchModel' (and enable 'useResponsesApiWebSearch' for Copilot models) or route the model to a Google provider."
+  }
+  if (parseProviderModelAlias(webSearchModel)) {
+    return `Google Search is unavailable because 'messageApiWebSearchModel' ('${webSearchModel}') does not match an enabled provider.`
+  }
+  return "Google Search is disabled because 'useResponsesApiWebSearch' is off. Enable 'useResponsesApiWebSearch' or configure 'messageApiWebSearchModel' with a web-search-capable provider."
 }
 
 function clearStreamSSEHeaders(c: Context): void {
@@ -472,7 +605,10 @@ async function handleNativeGoogleProviderPassthrough(
 ): Promise<Response> {
   const { model, payload, providerConfig, stream, useSSE } = options
   const modelConfig = providerConfig.models?.[model]
-  const forwardedPayload = applyGoogleModelConfigDefaults(payload, modelConfig)
+  const forwardedPayload = applyGoogleModelConfigDefaults(
+    stripAntigravitySignatures(payload),
+    modelConfig,
+  )
   const controller = new AbortController()
   const signal = AbortSignal.any([controller.signal, c.req.raw.signal])
 

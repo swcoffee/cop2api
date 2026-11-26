@@ -132,10 +132,12 @@ Use lowerCamelCase for Gemini request fields such as `generationConfig` and `inl
 
 | Endpoint | Method | Description |
 | --- | --- | --- |
-| `GET /v1beta/models` | `GET` | Lists available gateway models in Google `models/<id>` format. |
+| `GET /v1beta/models` | `GET` | Lists available gateway models in Google `models/<id>` format. Models with multiple reasoning levels are listed as variants such as `-high`. A variant selects that level on the base model. |
 | `POST /v1beta/models/<model>:generateContent` | `POST` | Generates a non-streaming Gemini response. Supports `provider/model` aliases and model mappings. |
 | `POST /v1beta/models/<model>:streamGenerateContent` | `POST` | Generates a streaming Gemini response as SSE (`?alt=sse`) or a JSON array. |
 | `POST /v1beta:<action>` | `POST` | Acknowledges Antigravity / GenAI telemetry pings with `{}`. |
+
+The Gemini catalog follows each provider's `agentsModels` selection. It can advertise a `my-gemini-` alias for a selected model that accepts both images and PDF files. Generation resolves that alias to the original model and applies any reasoning level selected in the ID.
 
 ### Usage Monitoring Endpoints
 
